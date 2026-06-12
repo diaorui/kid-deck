@@ -93,7 +93,7 @@ def main():
     controller.plugins = discover_plugins(controller, plugins_cfg)
     controller._plugin_map = {p.name: p for p in controller.plugins}
 
-    app = FastAPI(title="Storyteller Controller")
+    app = FastAPI(title="KidDeck")
     templates = Jinja2Templates(directory=Path(__file__).parent)
 
     ap = controller.get_plugin("audio_player")
