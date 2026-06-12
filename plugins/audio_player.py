@@ -1,0 +1,472 @@
+import random
+import threading
+import time
+from datetime import datetime, time as dtime
+from enum import Enum, auto
+from pathlib import Path
+from queue import Queue, Empty
+
+from camera_client import convert_to_pcm
+from plugins import Plugin
+
+
+class Command(Enum):
+    PAUSE = auto()
+    RESUME = auto()
+    SET_VOLUME = auto()
+    STOP = auto()
+
+
+def parse_time(time_str: str) -> dtime:
+    parts = time_str.strip().split(":")
+    return dtime(int(parts[0]), int(parts[1]))
+
+
+class AudioPlayerPlugin(Plugin):
+    name = "audio_player"
+    title = "Player"
+    icon = "🔊"
+    order = 0
+
+    def __init__(self, controller, config: dict):
+        super().__init__(controller, config)
+
+        self.stories_root = Path(config["folder"])
+        self.rate = config.get("playback_rate", 16000)
+        self.volume = config.get("volume", 60)
+        self.bytes_per_second = self.rate * 2
+
+        sched = config["schedule"]
+        self.stop_time = parse_time(sched["stop_time"])
+
+        self.cache_dir = Path(__file__).resolve().parent.parent / "cache"
+        self.cache_dir.mkdir(exist_ok=True)
+
+        self.cmd_queue: Queue = Queue()
+        self._abort_event = threading.Event()
+        self._resume_event = threading.Event()
+        self._resume_event.set()
+        self._thread: threading.Thread | None = None
+
+        self.current_series = ""
+        self.current_file = ""
+        self.current_index = 0
+        self.total_in_series = 0
+        self.paused = False
+        self.playing = False
+        self.streaming = False
+
+        self.audio_files_by_series: dict[str, list[Path]] = {}
+        self.pcm_cache: dict[Path, bytes] = {}
+        self.series_order: list[str] = []
+        self.selected_series = ""
+
+    def _past_stop_time(self) -> bool:
+        now = datetime.now().time()
+        if self.stop_time.hour < 6:
+            if now.hour < 6:
+                return now >= self.stop_time
+            return True
+        if now.hour < 6:
+            return False
+        return now >= self.stop_time
+
+    def scan_files(self):
+        patterns = ["*.mp3", "*.MP3", "*.wav", "*.WAV"]
+        self.audio_files_by_series = {}
+
+        if not self.stories_root.exists():
+            raise RuntimeError(f"Stories folder not found: {self.stories_root}")
+
+        detected = []
+        for item in sorted(self.stories_root.iterdir()):
+            if item.is_dir() and not item.name.startswith(".") and item.name != "cache":
+                if (item / "audio").is_dir() or (item / "index.md").exists():
+                    detected.append(item.name)
+        series = self.config.get("series") or detected
+        if not series:
+            raise RuntimeError(f"No story series found in {self.stories_root}")
+
+        for series_name in series:
+            series_dir = self.stories_root / series_name / "audio"
+            if not series_dir.is_dir():
+                continue
+            files = []
+            for p in patterns:
+                files.extend(sorted(series_dir.glob(p), key=lambda f: f.name))
+            if files:
+                self.audio_files_by_series[series_name] = files
+
+        if not self.audio_files_by_series:
+            raise RuntimeError(f"No mp3/wav files found under {self.stories_root}")
+
+        self.series_order = list(self.audio_files_by_series.keys())
+        parts = ", ".join(f"{k}={len(v)}" for k, v in self.audio_files_by_series.items())
+        total = sum(len(v) for v in self.audio_files_by_series.values())
+        print(f"Audio player: found files — {parts}, total={total}")
+
+    def build_cache(self):
+        print("Audio player: building PCM cache...")
+        self.pcm_cache = {}
+        for series_name, files in self.audio_files_by_series.items():
+            for fp in files:
+                cache_path = self._get_cache_path(fp)
+                if cache_path.exists() and fp.stat().st_mtime <= cache_path.stat().st_mtime:
+                    pcm = cache_path.read_bytes()
+                    if pcm:
+                        self.pcm_cache[fp] = pcm
+                        continue
+                try:
+                    pcm = convert_to_pcm(str(fp), self.rate)
+                except (RuntimeError, FileNotFoundError) as e:
+                    print(f"  SKIP {fp.name}: {e}", flush=True)
+                    continue
+                cache_path.write_bytes(pcm)
+                self.pcm_cache[fp] = pcm
+
+        if not self.pcm_cache:
+            raise RuntimeError("No audio files could be converted")
+
+        total_dur = sum(len(p) for p in self.pcm_cache.values()) / self.bytes_per_second
+        print(f"Audio player: {len(self.pcm_cache)} files cached, {total_dur:.1f}s total")
+
+    def _get_cache_path(self, file_path: Path) -> Path:
+        rel = file_path.relative_to(self.stories_root)
+        cache_dir = self.cache_dir / rel.parent
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir / f"{file_path.stem}.pcm"
+
+    def _process_commands(self):
+        while True:
+            try:
+                cmd, arg = self.cmd_queue.get_nowait()
+            except Empty:
+                return
+
+            if cmd == Command.PAUSE:
+                self.paused = True
+                self._resume_event.clear()
+                self._emit_state()
+
+            elif cmd == Command.RESUME:
+                if self.paused:
+                    self.paused = False
+                    self._resume_event.set()
+                    self._emit_state()
+
+            elif cmd == Command.SET_VOLUME:
+                self.volume = max(0, min(100, arg))
+                self._emit_state()
+
+            elif cmd == Command.STOP:
+                self._abort_event.set()
+                self._resume_event.set()
+                self.playing = False
+
+    def _emit_state(self):
+        if self.controller:
+            self.controller.emit("audio_player:state_changed", state=self.get_state())
+
+    def get_state(self) -> dict:
+        if self.paused:
+            state = "paused"
+        elif self.streaming:
+            state = "playing"
+        elif self.playing:
+            state = "preparing"
+        else:
+            state = "idle"
+
+        return {
+            "state": state,
+            "playing": self.playing,
+            "paused": self.paused,
+            "streaming": self.streaming,
+            "current_series": self.current_series,
+            "current_file": self.current_file,
+            "current_index": self.current_index,
+            "total_in_series": self.total_in_series,
+            "volume": self.volume,
+            "series_list": list(self.audio_files_by_series.keys()),
+            "series_file_counts": {k: len(v) for k, v in self.audio_files_by_series.items()},
+            "selected_series": self.selected_series,
+            "past_stop_time": self._past_stop_time(),
+            "stop_time": self.stop_time.strftime("%H:%M"),
+        }
+
+    def _wait_while_paused(self):
+        while self.playing and self.paused:
+            self._process_commands()
+            if not self.paused:
+                break
+            self._resume_event.wait(timeout=0.5)
+
+    def _process_commands_loop(self, interval: float = 1.0, count: int = 1):
+        for _ in range(count):
+            if not self.playing:
+                return False
+            self._process_commands()
+            if self.paused:
+                self._wait_while_paused()
+            time.sleep(interval)
+        return self.playing
+
+    def _play_loop(self):
+        self.playing = True
+        loop_num = 0
+
+        while self.playing:
+            self._process_commands()
+            if self.paused:
+                self._wait_while_paused()
+
+            if not self.playing:
+                break
+
+            if self.selected_series:
+                series_list = [self.selected_series]
+            else:
+                series_list = list(self.series_order)
+                random.shuffle(series_list)
+
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Loop {loop_num + 1} starting: {series_list}", flush=True)
+
+            for series_name in series_list:
+                if not self.playing:
+                    break
+                if not self._process_commands_loop(0, 0):
+                    break
+
+                files = self.audio_files_by_series[series_name]
+                start_idx = 0
+
+                for idx in range(start_idx, len(files)):
+                    if not self.playing:
+                        break
+                    if not self._process_commands_loop(0, 0):
+                        break
+
+                    fp = files[idx]
+                    if fp not in self.pcm_cache:
+                        continue
+                    pcm = self.pcm_cache[fp]
+
+                    if self._past_stop_time():
+                        self.playing = False
+                        break
+
+                    self.current_series = series_name
+                    self.current_file = str(fp.relative_to(self.stories_root))
+                    self.current_index = idx + 1
+                    self.total_in_series = len(files)
+                    self._emit_state()
+
+                    dur = len(pcm) / self.bytes_per_second
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] ({self.current_file}, {dur:.1f}s)", flush=True)
+
+                    self._abort_event.clear()
+                    self.streaming = True
+                    self._emit_state()
+                    camera = self.controller.camera
+                    camera.play_pcm(pcm, self.rate, self.volume,
+                                    abort_event=self._abort_event,
+                                    tick_callback=self._process_commands)
+                    self.streaming = False
+
+                    if self._abort_event.is_set():
+                        self._process_commands()
+                        break
+
+                    time.sleep(0.15)
+
+            loop_num += 1
+
+        self.playing = False
+        self.paused = False
+        self._emit_state()
+
+    def start(self):
+        super().start()
+        print("Audio player: ready (idle)")
+
+    def stop(self):
+        self._abort_event.set()
+        self._resume_event.set()
+        self.playing = False
+        if self._thread:
+            self._thread.join(timeout=5)
+        super().stop()
+        print("Audio player: stopped")
+
+    def start_playback(self):
+        if self._thread and self._thread.is_alive():
+            self.stop_playback()
+            self._thread.join(timeout=3)
+            self._thread = None
+        while not self.cmd_queue.empty():
+            try:
+                self.cmd_queue.get_nowait()
+            except Empty:
+                break
+        self._abort_event.clear()
+        self._resume_event.set()
+        self.current_series = ""
+        self.current_file = ""
+        self.current_index = 0
+        self.total_in_series = 0
+        self.paused = False
+        self.streaming = False
+        self._thread = threading.Thread(target=self._play_loop, daemon=True)
+        self._thread.start()
+
+    def stop_playback(self):
+        self.cmd_queue.put((Command.STOP, None))
+
+    def pause(self):
+        self.cmd_queue.put((Command.PAUSE, None))
+
+    def resume(self):
+        self.cmd_queue.put((Command.RESUME, None))
+
+    def set_volume(self, volume: int):
+        self.cmd_queue.put((Command.SET_VOLUME, volume))
+
+    def register_routes(self, app):
+        from fastapi import Request
+
+        @self.router.get("/status")
+        async def status():
+            return self.get_state()
+
+        @self.router.post("/play")
+        async def play_route():
+            self.start_playback()
+            return {"ok": True}
+
+        @self.router.post("/stop")
+        async def stop_route():
+            self.stop_playback()
+            return {"ok": True}
+
+        @self.router.post("/volume")
+        async def volume_route(request: Request):
+            data = await request.json()
+            self.set_volume(data.get("volume", self.volume))
+            return {"ok": True}
+
+        @self.router.post("/select_series")
+        async def select_series_route(request: Request):
+            data = await request.json()
+            series = data.get("series", "")
+            if not series or series in self.audio_files_by_series:
+                self.selected_series = series
+            return {"ok": True}
+
+        app.include_router(self.router)
+
+    def ui_section(self) -> str:
+        return """
+        <div class="plugin-section" id="plugin-audio_player">
+          <div class="now-playing-card">
+            <div class="np-label">Now Playing</div>
+            <div class="np-status" id="ap-status">---</div>
+            <div class="np-series" id="ap-series">---</div>
+            <div class="np-track" id="ap-track">---</div>
+            <div class="np-progress" id="ap-progress">
+              <div class="progress-track-bg">
+                <div class="progress-track-fill" id="ap-progress-fill" style="width:0%"></div>
+              </div>
+              <span class="progress-text" id="ap-progress-text">0 / 0</span>
+            </div>
+          </div>
+
+          <div class="transport">
+            <button class="transport-btn transport-play" onclick="apToggle()" id="ap-play-btn">&#x25B6;</button>
+          </div>
+
+          <div class="volume-row">
+            <span class="vol-label">Volume</span>
+            <input type="range" class="vol-slider" id="ap-volume-slider" min="0" max="100"
+                   oninput="apSetVolume(this.value)">
+            <span class="vol-value" id="ap-volume-display">60</span>
+          </div>
+
+          <div class="series-picker" id="ap-series-container">
+            <div class="series-label">Series</div>
+            <div class="series-pills" id="ap-series-pills"></div>
+          </div>
+
+          <div class="stop-time-row">
+            <span class="stop-time-info">Auto-stop at <span id="ap-stop-time">--:--</span></span>
+          </div>
+        </div>
+        """
+
+    def ui_js(self) -> str:
+        return (
+            "let apState = {};\n"
+            "async function apFetch(url, body) {\n"
+            "  try {\n"
+            "    const opts = { method: 'POST' };\n"
+            "    if (body) { opts.body = JSON.stringify(body); opts.headers = { 'Content-Type': 'application/json' }; }\n"
+            "    await fetch(url, opts);\n"
+            "  } catch(e) { console.error(e); }\n"
+            "}\n"
+            "function apToggle() {\n"
+            "  apFetch('/api/audio_player/' + (apState.state === 'idle' ? 'play' : 'stop'));\n"
+            "}\n"
+            "async function apSetVolume(val) {\n"
+            "  document.getElementById('ap-volume-display').textContent = val;\n"
+            "  await apFetch('/api/audio_player/volume', { volume: parseInt(val) });\n"
+            "}\n"
+            "function apSelectSeries(name) { apFetch('/api/audio_player/select_series', { series: name }); }\n"
+            "async function apPoll() {\n"
+            "  try {\n"
+            "    const r = await fetch('/api/audio_player/status');\n"
+            "    const s = await r.json();\n"
+            "    apState = s;\n"
+            "    document.getElementById('ap-status').textContent = ({\n"
+            "      playing: 'Playing',\n"
+            "      paused: 'Paused',\n"
+            "      preparing: 'Preparing...',\n"
+            "    })[s.state] || s.state;\n"
+            "    document.getElementById('ap-series').textContent = s.current_series || '---';\n"
+            "    document.getElementById('ap-track').textContent = s.current_file ?\n"
+            "      s.current_file.split('/').pop() + ' (' + s.current_index + '/' + s.total_in_series + ')' : '---';\n"
+            "    document.getElementById('ap-stop-time').textContent = s.stop_time || '--:--';\n"
+            "    const progressEl = document.getElementById('ap-progress');\n"
+            "    if (s.state === 'playing' || s.state === 'paused') {\n"
+            "      progressEl.style.display = '';\n"
+            "      if (s.total_in_series > 0) {\n"
+            "        const pct = Math.round((s.current_index / s.total_in_series) * 100);\n"
+            "        document.getElementById('ap-progress-fill').style.width = Math.min(pct, 100) + '%';\n"
+            "        document.getElementById('ap-progress-text').textContent = s.current_index + ' / ' + s.total_in_series;\n"
+            "      }\n"
+            "    } else {\n"
+            "      progressEl.style.display = 'none';\n"
+            "    }\n"
+            "    const playBtn = document.getElementById('ap-play-btn');\n"
+            "    if (s.state === 'idle') {\n"
+            "      playBtn.innerHTML = '\\u25B6';\n"
+            "      playBtn.className = 'transport-btn transport-play';\n"
+            "    } else {\n"
+            "      playBtn.innerHTML = '\\u23F9';\n"
+            "      playBtn.className = 'transport-btn transport-play stop-btn';\n"
+            "    }\n"
+            "    document.getElementById('ap-volume-slider').value = s.volume;\n"
+            "    document.getElementById('ap-volume-display').textContent = s.volume;\n"
+            "    const pills = document.getElementById('ap-series-pills');\n"
+            "    if (s.series_list) {\n"
+            "      var isPlaying = s.state !== 'idle';\n"
+            "      pills.innerHTML = s.series_list.map(function(n) {\n"
+            "        var active = isPlaying ? (n === s.current_series) : (n === s.selected_series);\n"
+            "        var attrs = ' class=\"series-pill' + (active ? ' active' : '') + '\"';\n"
+            "        if (isPlaying) attrs += ' disabled';\n"
+            "        return '<button' + attrs + ' onclick=\"apSelectSeries(\\'' + n + '\\')\">' + n + '</button>';\n"
+            "      }).join('');\n"
+            "    }\n"
+            "  } catch(e) { console.error('Audio player poll failed', e); }\n"
+            "}\n"
+            "setInterval(apPoll, 1500);\n"
+            "apPoll();\n"
+        )

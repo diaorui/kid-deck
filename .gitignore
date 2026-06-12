@@ -1,0 +1,32 @@
+# Real config file (contains secrets — camera IP, SSH password)
+config.yaml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor / OS temp files
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Generated PCM audio cache
+cache/
+
+# Story content and test audio (not shared)
+stories/
+test/
+
+# Personal / one-off scripts
+scripts/
+generate_ct_voxcpm.py
+generate_kitchen_voxcpm.py
+test_chunk_generation.py
+
+# Project-specific documentation (not shared)
+youtube_channels.md
+
+# Tool / agent configuration
+.antigravitycli/

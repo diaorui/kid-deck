@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Storyteller Controller</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0f0f1a;
+    --card: #1a1a2e;
+    --card-hover: #222244;
+    --accent: #6c63ff;
+    --accent-dim: #4a44cc;
+    --text: #e0e0ff;
+    --text-dim: #8888aa;
+    --danger: #ff4444;
+    --success: #44cc88;
+    --radius: 12px;
+  }
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 16px;
+    line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
+  }
+  body { display: flex; flex-direction: column; max-width: 480px; margin: 0 auto; padding: 0; }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 16px 8px; flex-shrink: 0;
+  }
+  header h1 { font-size: 18px; font-weight: 600; }
+  .conn-status {
+    font-size: 12px; padding: 4px 10px; border-radius: 20px;
+    background: var(--success); color: #000;
+  }
+  .conn-status.disconnected { background: var(--danger); color: #fff; }
+
+  .tabs {
+    display: flex; gap: 4px; padding: 8px 16px; flex-shrink: 0;
+    overflow-x: auto; -webkit-overflow-scrolling: touch;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab-btn {
+    flex: 1; min-width: 0;
+    padding: 10px 12px; border: none; border-radius: var(--radius);
+    background: var(--card); color: var(--text-dim);
+    font-size: 14px; font-weight: 500; cursor: pointer;
+    transition: all 0.2s; white-space: nowrap;
+  }
+  .tab-btn.active { background: var(--accent); color: #fff; }
+  .tab-btn:active { transform: scale(0.96); }
+
+  main { flex: 1; overflow-y: auto; padding: 8px 16px 80px; }
+  .plugin-section { display: none; }
+  .plugin-section.active { display: block; }
+  .hidden { display: none !important; }
+
+  .now-playing-card {
+    background: var(--card); border-radius: var(--radius); padding: 20px;
+    margin-bottom: 16px;
+  }
+  .np-label { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .np-status { font-size: 13px; color: var(--accent); margin-bottom: 8px; }
+  .np-series { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+  .np-track { font-size: 14px; color: var(--text-dim); margin-bottom: 12px; }
+  .progress-track-bg {
+    height: 6px; background: #333; border-radius: 3px; overflow: hidden;
+  }
+  .progress-track-fill {
+    height: 100%; background: var(--accent); border-radius: 3px;
+    transition: width 0.5s ease;
+  }
+  .progress-text { font-size: 12px; color: var(--text-dim); margin-top: 4px; display: block; }
+
+  .transport {
+    display: flex; justify-content: center; align-items: center;
+    gap: 24px; padding: 16px 0; margin-bottom: 8px;
+  }
+  .transport-btn {
+    width: 56px; height: 56px; border: none; border-radius: 50%;
+    background: var(--card); color: var(--text); font-size: 22px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: all 0.2s;
+  }
+  .transport-btn:active { transform: scale(0.9); background: var(--card-hover); }
+  .transport-play { width: 68px; height: 68px; background: var(--accent); font-size: 26px; }
+  .transport-play:active { background: var(--accent-dim); }
+  .transport-play.stop-btn { background: var(--danger); }
+  .transport-play.stop-btn:active { background: #cc3333; }
+  .transport-btn:disabled { opacity: 0.35; cursor: default; transform: none; }
+  .transport-btn:disabled:active { transform: none; background: var(--card); }
+
+  .volume-row {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--card); border-radius: var(--radius); padding: 12px 16px;
+    margin-bottom: 12px;
+  }
+  .vol-label { font-size: 14px; color: var(--text-dim); min-width: 50px; }
+  .vol-slider { flex: 1; height: 6px; -webkit-appearance: none; appearance: none; background: #333; border-radius: 3px; outline: none; }
+  .vol-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%; background: var(--accent); cursor: pointer; }
+  .vol-value { min-width: 30px; text-align: right; font-size: 14px; font-weight: 600; }
+
+  .series-picker { margin-bottom: 12px; }
+  .series-label { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .series-pills { display: flex; flex-wrap: wrap; gap: 8px; }
+  .series-pill {
+    padding: 8px 16px; border: 1px solid #333; border-radius: 20px;
+    background: transparent; color: var(--text); font-size: 14px;
+    cursor: pointer; transition: all 0.2s;
+  }
+  .series-pill.active { border-color: var(--accent); background: var(--accent); color: #fff; }
+  .series-pill:active { transform: scale(0.95); }
+  .series-pill:disabled { opacity: 0.35; cursor: default; pointer-events: none; }
+
+  .stop-time-row {
+    background: var(--card); border-radius: var(--radius); padding: 12px 16px;
+    margin-top: 12px;
+  }
+  .stop-time-info { font-size: 13px; color: var(--text-dim); }
+  .stop-time-info span { color: var(--accent); font-weight: 600; }
+
+  .alarm-volume-row { margin-top: 12px; margin-bottom: 12px; }
+
+  .yt-ch-label {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 6px 12px; border: 1px solid #333; border-radius: 16px;
+    font-size: 12px; cursor: pointer; transition: all 0.2s; user-select: none;
+  }
+  .yt-ch-label.active { border-color: var(--accent); background: var(--accent); color: #fff; }
+  .yt-ch-label:active { transform: scale(0.95); }
+  .yt-queue-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; border-radius: 8px; font-size: 13px;
+    transition: background 0.2s;
+  }
+  .yt-queue-item:hover { background: var(--card-hover); }
+  .yt-queue-item.playing {
+    background: var(--accent); color: #fff; font-weight: 500;
+  }
+  .yt-queue-item.current:not(.playing) { background: var(--card); }
+  .yt-qi-indicator { width: 16px; text-align: center; flex-shrink: 0; font-size: 11px; }
+  .yt-qi-date { color: var(--text-dim); flex-shrink: 0; font-size: 11px; width: 32px; }
+  .yt-qi-handle { color: var(--text-dim); flex-shrink: 0; font-size: 11px; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .yt-qi-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .yt-qi-dur { color: var(--text-dim); flex-shrink: 0; font-size: 11px; width: 44px; text-align: right; }
+  .yt-queue-item.playing .yt-qi-date,
+  .yt-queue-item.playing .yt-qi-handle,
+  .yt-queue-item.playing .yt-qi-dur { color: rgba(255,255,255,0.7); }
+  .alarm-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .alarm-header h2 { font-size: 16px; font-weight: 600; }
+  .add-btn {
+    padding: 8px 16px; border: none; border-radius: var(--radius);
+    background: var(--accent); color: #fff; font-size: 14px; font-weight: 600;
+    cursor: pointer;
+  }
+  .add-btn:active { transform: scale(0.95); }
+
+  .alarm-list { display: flex; flex-direction: column; gap: 2px; }
+  .empty-state { text-align: center; color: var(--text-dim); padding: 32px 0; font-size: 14px; }
+  .alarm-item {
+    display: flex; align-items: center;
+    background: var(--card); border-radius: var(--radius); padding: 12px 16px;
+    transition: opacity 0.2s;
+  }
+  .alarm-item.disabled { opacity: 0.45; }
+
+  .alarm-left { flex: 1; min-width: 0; }
+  .alarm-time-row { display: flex; align-items: baseline; gap: 8px; }
+  .alarm-time { font-size: 30px; font-weight: 300; letter-spacing: -1px; line-height: 1.1; }
+  .alarm-days-row { display: flex; gap: 2px; margin-top: 4px; }
+  .alarm-day {
+    font-size: 10px; font-weight: 500; width: 20px; height: 20px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 50%; color: var(--text-dim);
+  }
+  .alarm-day.active { color: var(--text); }
+  .alarm-label { font-size: 13px; color: var(--text-dim); margin-top: 2px; }
+
+  .alarm-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; margin-left: 12px; }
+
+  .alarm-meta { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+  .alarm-meta-btn {
+    padding: 2px 8px; border: none; border-radius: 12px;
+    background: transparent; color: var(--text-dim); font-size: 11px;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .alarm-meta-btn:active { background: var(--card-hover); }
+  .alarm-meta-btn.danger { color: var(--danger); }
+
+  /* Toggle switch - Android/Material style */
+  .switch {
+    position: relative; display: inline-block;
+    width: 46px; height: 24px; flex-shrink: 0;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .track {
+    position: absolute; cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: #555; border-radius: 12px;
+    transition: background 0.25s;
+  }
+  .switch .thumb {
+    position: absolute; content: "";
+    height: 18px; width: 18px; left: 3px; bottom: 3px;
+    background: #ccc; border-radius: 50%;
+    transition: transform 0.25s, background 0.25s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+  }
+  .switch input:checked + .track { background: var(--accent-dim); }
+  .switch input:checked + .track .thumb { transform: translateX(22px); background: var(--accent); }
+
+  .modal-overlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center;
+    z-index: 1000; padding: 20px;
+  }
+  .modal {
+    background: var(--card); border-radius: var(--radius); padding: 24px;
+    width: 100%; max-width: 400px;
+  }
+  .modal h3 { font-size: 16px; margin-bottom: 16px; }
+  .form-row { margin-bottom: 12px; }
+  .form-row label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+  .form-row input[type="time"],
+  .form-row input[type="text"] {
+    width: 100%; padding: 10px 12px; border: 1px solid #333; border-radius: 8px;
+    background: var(--bg); color: var(--text); font-size: 14px; outline: none;
+  }
+  .form-row input:focus { border-color: var(--accent); }
+  .day-picker { display: flex; gap: 4px; flex-wrap: wrap; }
+  .day-btn {
+    display: flex; align-items: center; gap: 2px;
+    padding: 6px 8px; border: 1px solid #333; border-radius: 8px;
+    font-size: 11px; cursor: pointer; transition: all 0.2s; user-select: none;
+  }
+  .day-btn input { display: none; }
+  .day-btn:has(input:checked) { border-color: var(--accent); background: var(--accent); color: #fff; }
+  .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+  .cancel-btn {
+    padding: 10px 20px; border: 1px solid #555; border-radius: 8px;
+    background: transparent; color: var(--text); font-size: 14px; cursor: pointer;
+  }
+  .save-btn {
+    padding: 10px 20px; border: none; border-radius: 8px;
+    background: var(--accent); color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+
+  footer {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    padding: 8px 16px 16px; text-align: center; flex-shrink: 0;
+    background: linear-gradient(transparent, var(--bg) 40%);
+  }
+  .restart-btn {
+    padding: 8px 20px; border: 1px solid #555; border-radius: 20px;
+    background: transparent; color: var(--text-dim); font-size: 12px;
+    cursor: pointer; transition: all 0.2s;
+  }
+  .restart-btn:active { border-color: var(--danger); color: var(--danger); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📡 Storyteller</h1>
+  <span class="conn-status" id="conn-status">● Connected</span>
+</header>
+
+<nav class="tabs" id="tabs">
+  {% for plugin in plugins %}
+  <button class="tab-btn {% if loop.first %}active{% endif %}" data-tab="plugin-{{ plugin.name }}">
+    {{ plugin.icon }} {{ plugin.title }}
+  </button>
+  {% endfor %}
+</nav>
+
+<main>
+  {% for plugin in plugins %}
+  {{ plugin.ui_section() | safe }}
+  {% endfor %}
+</main>
+
+<footer>
+  <button class="restart-btn" onclick="confirmRestart()">↻ Restart</button>
+</footer>
+
+<script>
+/* Shared: tab switching */
+(function() {
+  var tabs = document.getElementById('tabs');
+  if (!tabs) return;
+  tabs.addEventListener('click', function(e) {
+    var btn = e.target.closest('.tab-btn');
+    if (!btn) return;
+
+    document.querySelectorAll('.tab-btn').forEach(function(t) { t.classList.remove('active'); });
+    btn.classList.add('active');
+
+    document.querySelectorAll('.plugin-section').forEach(function(s) { s.classList.remove('active'); });
+    var target = document.getElementById(btn.dataset.tab);
+    if (target) target.classList.add('active');
+  });
+
+  // Activate first tab
+  var firstTab = document.querySelector('.tab-btn.active');
+  if (firstTab) firstTab.click();
+})();
+
+/* Shared: connection status */
+async function pollStatus() {
+  try {
+    var r = await fetch('/api/status');
+    var s = await r.json();
+    var el = document.getElementById('conn-status');
+    if (s.camera_connected) {
+      el.textContent = '● Connected';
+      el.className = 'conn-status';
+    } else {
+      el.textContent = '● No Camera';
+      el.className = 'conn-status disconnected';
+    }
+  } catch(e) {
+    var el = document.getElementById('conn-status');
+    el.textContent = '● Disconnected';
+    el.className = 'conn-status disconnected';
+  }
+}
+setInterval(pollStatus, 3000);
+pollStatus();
+
+/* Shared: restart */
+function confirmRestart() {
+  if (confirm('Restart the controller? Audio will stop briefly.')) {
+    fetch('/api/restart', { method: 'POST' });
+    document.getElementById('conn-status').textContent = '● Restarting';
+    document.getElementById('conn-status').className = 'conn-status disconnected';
+  }
+}
+</script>
+
+{% for plugin in plugins %}
+<script>{{ plugin.ui_js() | safe }}</script>
+{% endfor %}
+
+</body>
+</html>
