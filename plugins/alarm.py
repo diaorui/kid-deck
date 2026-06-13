@@ -218,13 +218,13 @@ class AlarmPlugin(Plugin):
                 <div class="form-row">
                   <label>Days</label>
                   <div class="day-picker" id="alarm-form-days">
-                    <label class="day-btn"><input type="checkbox" value="0">Sun</label>
-                    <label class="day-btn"><input type="checkbox" value="1" checked>Mon</label>
-                    <label class="day-btn"><input type="checkbox" value="2" checked>Tue</label>
-                    <label class="day-btn"><input type="checkbox" value="3" checked>Wed</label>
-                    <label class="day-btn"><input type="checkbox" value="4" checked>Thu</label>
-                    <label class="day-btn"><input type="checkbox" value="5" checked>Fri</label>
-                    <label class="day-btn"><input type="checkbox" value="6">Sat</label>
+                    <label class="day-btn"><input type="checkbox" value="0" checked>Mon</label>
+                    <label class="day-btn"><input type="checkbox" value="1" checked>Tue</label>
+                    <label class="day-btn"><input type="checkbox" value="2" checked>Wed</label>
+                    <label class="day-btn"><input type="checkbox" value="3" checked>Thu</label>
+                    <label class="day-btn"><input type="checkbox" value="4" checked>Fri</label>
+                    <label class="day-btn"><input type="checkbox" value="5">Sat</label>
+                    <label class="day-btn"><input type="checkbox" value="6">Sun</label>
                   </div>
                 </div>
                 <div class="form-row">
@@ -273,7 +273,7 @@ class AlarmPlugin(Plugin):
                 container.innerHTML = '<div class="empty-state">No alarms yet. Tap + to add one.</div>';
                 return;
             }
-            var dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+            var dayNames = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
             var html = '';
             for (var i = 0; i < alarmsData.length; i++) {
                 var a = alarmsData[i];

@@ -14,7 +14,7 @@ plugins:
         label: Get up!
         enabled: false
         time: "07:00"
-        days: [0, 1, 2, 3, 4, 5, 6]
+        days: [0, 1, 2, 3, 4, 5, 6]  # 0=Mon ... 6=Sun
         audio: ""            # Path to alarm audio file (WAV)
     volume: 60
 
