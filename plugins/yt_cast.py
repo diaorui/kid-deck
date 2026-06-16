@@ -1,4 +1,3 @@
-import concurrent.futures
 import json
 import os
 import re
@@ -361,28 +360,28 @@ class YTCastPlugin(Plugin):
             import asyncio
             loop = asyncio.get_event_loop()
 
-            def _fetch_channel(handle: str) -> list[dict]:
-                cid = _resolve_channel_id(handle)
-                if cid is None:
-                    return []
-                try:
-                    videos = _fetch_channel_videos(cid)
-                    for v in videos:
-                        v["handle"] = handle
-                    return videos
-                except Exception as e:
-                    print(f"YT Cast: failed to fetch {handle}: {e}", flush=True)
-                    return []
-
             def _do_refresh():
                 enabled = [ch for ch in self.channels if self.channel_enabled.get(ch, True)]
                 if not enabled:
                     return []
                 result = []
-                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-                    futures = [pool.submit(_fetch_channel, h) for h in enabled]
-                    for future in concurrent.futures.as_completed(futures):
-                        result.extend(future.result())
+                for handle in enabled:
+                    for attempt in range(2):
+                        try:
+                            cid = _resolve_channel_id(handle)
+                            if cid is None:
+                                break
+                            videos = _fetch_channel_videos(cid)
+                            if videos:
+                                for v in videos:
+                                    v["handle"] = handle
+                                result.extend(videos)
+                                break
+                        except Exception as e:
+                            if attempt == 0:
+                                time.sleep(0.5)
+                                continue
+                            print(f"YT Cast: failed to fetch {handle}: {e}", flush=True)
                 result.sort(key=lambda v: v["published"], reverse=True)
                 return result[:20]
 
