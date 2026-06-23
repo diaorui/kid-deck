@@ -488,18 +488,18 @@ class YTCastPlugin(Plugin):
             <div class="series-pills" id="yt-channel-pills"></div>
           </details>
 
+          <div class="transport" id="yt-controls" style="gap:12px">
+            <button class="transport-btn transport-play" onclick="ytPlay()" id="yt-play-btn">&#x25B6;</button>
+            <button class="transport-btn transport-play stop-btn" onclick="ytStop()" id="yt-stop-btn" style="display:none">&#x23F9;</button>
+            <button class="transport-btn" onclick="ytSkip()" id="yt-skip-btn" style="display:none">&#x23ED;</button>
+          </div>
+
           <div class="series-picker" id="yt-queue-section" style="display:none">
             <div class="series-label" style="display:flex; justify-content:space-between; align-items:center">
               <span>Queue</span>
               <span id="yt-queue-count" style="font-size:12px; color:var(--text-dim)">0 videos</span>
             </div>
             <div id="yt-queue-list" style="max-height:320px; overflow-y:auto; margin-top:8px"></div>
-          </div>
-
-          <div class="transport" id="yt-controls" style="gap:12px">
-            <button class="transport-btn transport-play" onclick="ytPlay()" id="yt-play-btn">&#x25B6;</button>
-            <button class="transport-btn transport-play stop-btn" onclick="ytStop()" id="yt-stop-btn" style="display:none">&#x23F9;</button>
-            <button class="transport-btn" onclick="ytSkip()" id="yt-skip-btn" style="display:none">&#x23ED;</button>
           </div>
         </div>
         """
