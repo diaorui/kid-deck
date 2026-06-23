@@ -86,7 +86,7 @@ class YTCastPlugin(Plugin):
         super().__init__(controller, config)
 
         self.channels: list[str] = list(config.get("channels", []))
-        self.uncast_duration: int = config.get("uncast_duration", 45)
+        self.uncast_duration: int = config.get("uncast_duration", 40)
 
         self.status = "disconnected"
         self.device_name = ""
@@ -478,12 +478,9 @@ class YTCastPlugin(Plugin):
             <div id="yt-errmsg" style="display:none; margin-top:8px; padding:8px 12px; background:#2a1515; border:1px solid #ff4444; border-radius:8px; font-size:13px; color:#ff8888"></div>
           </div>
 
-          <div class="volume-row" id="yt-uncast-row">
-            <span class="vol-label">Auto-stop: <span id="yt-uncast-current">45 min</span></span>
-            <input type="number" class="vol-slider" id="yt-uncast-input" min="0" max="999" value="45"
-                   style="flex:0 0 70px; background:var(--bg); color:var(--text); border:1px solid #333; border-radius:8px; padding:8px 12px; font-size:14px; outline:none">
-            <span style="font-size:13px; color:var(--text-dim)">minutes</span>
-            <button class="toggle-btn" onclick="ytSetDuration()" id="yt-uncast-set-btn" style="flex-shrink:0">Set</button>
+          <div class="series-picker">
+            <div class="series-label">Auto-stop</div>
+            <div class="series-pills" id="yt-uncast-pills"></div>
           </div>
 
           <div class="series-picker" id="yt-channels-section">
@@ -581,16 +578,11 @@ class YTCastPlugin(Plugin):
           if (!r || !r.ok) { ytShowError(r ? r.error : 'Skip failed'); }
         }
 
-        async function ytSetDuration() {
-          const val = parseInt(document.getElementById('yt-uncast-input').value) || 45;
-          const r = await ytFetch('/api/yt_cast/uncast_duration', { minutes: val });
-          if (r && r.ok) {
-            const btn = document.getElementById('yt-uncast-set-btn');
-            const orig = btn.textContent;
-            btn.textContent = '\u2713';
-            setTimeout(function() { btn.textContent = orig; }, 1500);
-          }
+        async function ytSetDuration(m) {
+          ytHideError();
+          const r = await ytFetch('/api/yt_cast/uncast_duration', { minutes: m });
           ytPoll();
+          if (!r || !r.ok) { ytShowError(r ? r.error : 'Set failed'); }
         }
 
         async function ytToggleChannel(handle, enabled) {
@@ -666,9 +658,17 @@ class YTCastPlugin(Plugin):
             }
 
             const connected = s.status !== 'disconnected';
-            document.getElementById('yt-uncast-current').textContent = (s.uncast_duration || 45) + ' min';
-            document.getElementById('yt-uncast-input').value = s.uncast_duration || 45;
             document.getElementById('yt-queue-section').style.display = connected ? '' : 'none';
+
+            const uncastPills = document.getElementById('yt-uncast-pills');
+            if (uncastPills) {
+              var opts = [0,10,20,30,40,50,60,70,80,90,100,110,120];
+              uncastPills.innerHTML = opts.map(function(m) {
+                var a = m === (s.uncast_duration || 0) ? ' active' : '';
+                var l = m === 0 ? 'Off' : m + 'm';
+                return '<button class=\"series-pill' + a + '\" onclick=\"ytSetDuration(' + m + ')\">' + l + '</button>';
+              }).join('');
+            }
 
             ytRenderChannels(s);
             if (connected) {
