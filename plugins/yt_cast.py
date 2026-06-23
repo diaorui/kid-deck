@@ -472,11 +472,8 @@ class YTCastPlugin(Plugin):
     def ui_section(self) -> str:
         return """
         <div class="plugin-section" id="plugin-yt_cast">
-          <div class="now-playing-card">
-            <div class="np-label">Chromecast</div>
-            <div class="np-status" id="yt-status">Disconnected</div>
-            <div id="yt-errmsg" style="display:none; margin-top:8px; padding:8px 12px; background:#2a1515; border:1px solid #ff4444; border-radius:8px; font-size:13px; color:#ff8888"></div>
-          </div>
+          <div class="yt-status-line" id="yt-status">Disconnected</div>
+          <div id="yt-errmsg" style="display:none; padding:8px 12px; background:#2a1515; border:1px solid #ff4444; border-radius:8px; font-size:13px; color:#ff8888; margin-bottom:12px"></div>
 
           <details class="collapsible">
             <summary>Auto-stop</summary>
