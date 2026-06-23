@@ -60,14 +60,10 @@
   .plugin-section.active { display: block; }
   .hidden { display: none !important; }
 
-  .now-playing-card {
-    background: var(--card); border-radius: var(--radius); padding: 20px;
-    margin-bottom: 16px;
+  .yt-status-line {
+    background: var(--card); border-radius: var(--radius); padding: 12px 16px;
+    margin-bottom: 16px; font-size: 13px;
   }
-  .np-label { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
-  .np-status { font-size: 13px; color: var(--accent); margin-bottom: 8px; }
-  .np-series { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
-  .np-track { font-size: 14px; color: var(--text-dim); margin-bottom: 12px; }
   .progress-track-bg {
     height: 6px; background: #333; border-radius: 3px; overflow: hidden;
   }
@@ -76,6 +72,17 @@
     transition: width 0.5s ease;
   }
   .progress-text { font-size: 12px; color: var(--text-dim); margin-top: 4px; display: block; }
+  .track-section { margin-top: 4px; }
+  .track-list { max-height: 320px; overflow-y: auto; }
+  .track-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; border-radius: 8px; font-size: 13px;
+    transition: background 0.2s;
+  }
+  .track-item.current { background: var(--accent); color: #fff; font-weight: 500; }
+  .track-item.upcoming { color: var(--text-dim); }
+  .track-item .track-indicator { width: 16px; text-align: center; flex-shrink: 0; font-size: 11px; }
+  .track-item .track-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 
   .transport {
     display: flex; justify-content: center; align-items: center;
@@ -125,13 +132,6 @@
   .series-pill.active { border-color: var(--accent); background: var(--accent); color: #fff; }
   .series-pill:active { transform: scale(0.95); }
   .series-pill:disabled { opacity: 0.35; cursor: default; pointer-events: none; }
-
-  .stop-time-row {
-    background: var(--card); border-radius: var(--radius); padding: 12px 16px;
-    margin-top: 12px;
-  }
-  .stop-time-info { font-size: 13px; color: var(--text-dim); }
-  .stop-time-info span { color: var(--accent); font-weight: 600; }
 
   .alarm-volume-row { margin-top: 12px; margin-bottom: 12px; }
 

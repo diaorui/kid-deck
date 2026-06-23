@@ -192,6 +192,9 @@ class AudioPlayerPlugin(Plugin):
             "selected_series": self.selected_series,
             "past_stop_time": self._past_stop_time(),
             "stop_time": self.stop_time.strftime("%H:%M"),
+            "current_series_files": [
+                f.stem for f in self.audio_files_by_series.get(self.current_series, [])
+            ] if self.current_series else [],
         }
 
     def _wait_while_paused(self):
@@ -367,22 +370,7 @@ class AudioPlayerPlugin(Plugin):
     def ui_section(self) -> str:
         return """
         <div class="plugin-section" id="plugin-audio_player">
-          <div class="now-playing-card">
-            <div class="np-label">Now Playing</div>
-            <div class="np-status" id="ap-status">---</div>
-            <div class="np-series" id="ap-series">---</div>
-            <div class="np-track" id="ap-track">---</div>
-            <div class="np-progress" id="ap-progress">
-              <div class="progress-track-bg">
-                <div class="progress-track-fill" id="ap-progress-fill" style="width:0%"></div>
-              </div>
-              <span class="progress-text" id="ap-progress-text">0 / 0</span>
-            </div>
-          </div>
-
-          <div class="transport">
-            <button class="transport-btn transport-play" onclick="apToggle()" id="ap-play-btn">&#x25B6;</button>
-          </div>
+          <div class="yt-status-line" id="ap-status-line">Idle</div>
 
           <div class="volume-row">
             <span class="vol-label">Volume</span>
@@ -391,13 +379,27 @@ class AudioPlayerPlugin(Plugin):
             <span class="vol-value" id="ap-volume-display">60</span>
           </div>
 
-          <div class="series-picker" id="ap-series-container">
-            <div class="series-label">Series</div>
+          <details class="collapsible">
+            <summary>Series</summary>
             <div class="series-pills" id="ap-series-pills"></div>
+          </details>
+
+          <details class="collapsible">
+            <summary>Auto-stop at <span id="ap-stop-time" style="color:var(--accent);font-weight:600">--:--</span></summary>
+          </details>
+
+          <div class="transport">
+            <button class="transport-btn transport-play" onclick="apToggle()" id="ap-play-btn">&#x25B6;</button>
           </div>
 
-          <div class="stop-time-row">
-            <span class="stop-time-info">Auto-stop at <span id="ap-stop-time">--:--</span></span>
+          <div class="track-section" id="ap-track-section">
+            <div id="ap-track-list" class="track-list"></div>
+            <div class="np-progress" id="ap-progress" style="margin-top:8px">
+              <div class="progress-track-bg">
+                <div class="progress-track-fill" id="ap-progress-fill" style="width:0%"></div>
+              </div>
+              <span class="progress-text" id="ap-progress-text">0 / 0</span>
+            </div>
           </div>
         </div>
         """
@@ -425,27 +427,15 @@ class AudioPlayerPlugin(Plugin):
             "    const r = await fetch('/api/audio_player/status');\n"
             "    const s = await r.json();\n"
             "    apState = s;\n"
-            "    document.getElementById('ap-status').textContent = ({\n"
-            "      playing: 'Playing',\n"
-            "      paused: 'Paused',\n"
-            "      preparing: 'Preparing...',\n"
-            "    })[s.state] || s.state;\n"
-            "    document.getElementById('ap-series').textContent = s.current_series || '---';\n"
-            "    document.getElementById('ap-track').textContent = s.current_file ?\n"
-            "      s.current_file.split('/').pop() + ' (' + s.current_index + '/' + s.total_in_series + ')' : '---';\n"
-            "    document.getElementById('ap-stop-time').textContent = s.stop_time || '--:--';\n"
-            "    const progressEl = document.getElementById('ap-progress');\n"
-            "    if (s.state === 'playing' || s.state === 'paused') {\n"
-            "      progressEl.style.display = '';\n"
-            "      if (s.total_in_series > 0) {\n"
-            "        const pct = Math.round((s.current_index / s.total_in_series) * 100);\n"
-            "        document.getElementById('ap-progress-fill').style.width = Math.min(pct, 100) + '%';\n"
-            "        document.getElementById('ap-progress-text').textContent = s.current_index + ' / ' + s.total_in_series;\n"
-            "      }\n"
+            "    var statusEl = document.getElementById('ap-status-line');\n"
+            "    if (s.state === 'idle') {\n"
+            "      statusEl.textContent = 'Idle';\n"
             "    } else {\n"
-            "      progressEl.style.display = 'none';\n"
+            "      var label = ({playing:'Playing', paused:'Paused', preparing:'Preparing...'})[s.state] || s.state;\n"
+            "      statusEl.textContent = label + ': ' + (s.current_series || '?') + ' \\u00B7 ' + (s.current_index || 0) + '/' + (s.total_in_series || 0);\n"
             "    }\n"
-            "    const playBtn = document.getElementById('ap-play-btn');\n"
+            "    document.getElementById('ap-stop-time').textContent = s.stop_time || '--:--';\n"
+            "    var playBtn = document.getElementById('ap-play-btn');\n"
             "    if (s.state === 'idle') {\n"
             "      playBtn.innerHTML = '\\u25B6';\n"
             "      playBtn.className = 'transport-btn transport-play';\n"
@@ -455,7 +445,7 @@ class AudioPlayerPlugin(Plugin):
             "    }\n"
             "    document.getElementById('ap-volume-slider').value = s.volume;\n"
             "    document.getElementById('ap-volume-display').textContent = s.volume;\n"
-            "    const pills = document.getElementById('ap-series-pills');\n"
+            "    var pills = document.getElementById('ap-series-pills');\n"
             "    if (s.series_list) {\n"
             "      var isPlaying = s.state !== 'idle';\n"
             "      pills.innerHTML = s.series_list.map(function(n) {\n"
@@ -464,6 +454,26 @@ class AudioPlayerPlugin(Plugin):
             "        if (isPlaying) attrs += ' disabled';\n"
             "        return '<button' + attrs + ' onclick=\"apSelectSeries(\\'' + n + '\\')\">' + n + '</button>';\n"
             "      }).join('');\n"
+            "    }\n"
+            "    var trackSection = document.getElementById('ap-track-section');\n"
+            "    var trackList = document.getElementById('ap-track-list');\n"
+            "    if (s.current_series_files && s.current_series_files.length > 0 && (s.state === 'playing' || s.state === 'paused')) {\n"
+            "      trackSection.style.display = '';\n"
+            "      var currentIdx = Math.max(0, (s.current_index || 1) - 1);\n"
+            "      trackList.innerHTML = s.current_series_files.map(function(f, i) {\n"
+            "        var isCurrent = (i === currentIdx);\n"
+            "        var cls = isCurrent ? 'track-item current' : 'track-item upcoming';\n"
+            "        var indicator = isCurrent ? '\\u25B6' : '';\n"
+            "        return '<div class=\"' + cls + '\"><span class=\"track-indicator\">' + indicator + '</span><span class=\"track-title\">' + f + '</span></div>';\n"
+            "      }).join('');\n"
+            "      if (s.total_in_series > 0) {\n"
+            "        document.getElementById('ap-progress').style.display = '';\n"
+            "        var pct = Math.round((s.current_index / s.total_in_series) * 100);\n"
+            "        document.getElementById('ap-progress-fill').style.width = Math.min(pct, 100) + '%';\n"
+            "        document.getElementById('ap-progress-text').textContent = s.current_index + ' / ' + s.total_in_series;\n"
+            "      }\n"
+            "    } else {\n"
+            "      trackSection.style.display = 'none';\n"
             "    }\n"
             "  } catch(e) { console.error('Audio player poll failed', e); }\n"
             "}\n"
