@@ -478,15 +478,15 @@ class YTCastPlugin(Plugin):
             <div id="yt-errmsg" style="display:none; margin-top:8px; padding:8px 12px; background:#2a1515; border:1px solid #ff4444; border-radius:8px; font-size:13px; color:#ff8888"></div>
           </div>
 
-          <div class="series-picker">
-            <div class="series-label">Auto-stop</div>
+          <details class="collapsible">
+            <summary>Auto-stop</summary>
             <div class="series-pills" id="yt-uncast-pills"></div>
-          </div>
+          </details>
 
-          <div class="series-picker" id="yt-channels-section">
-            <div class="series-label">Channels</div>
+          <details class="collapsible" id="yt-channels-section">
+            <summary>Channels</summary>
             <div class="series-pills" id="yt-channel-pills"></div>
-          </div>
+          </details>
 
           <div class="series-picker" id="yt-queue-section" style="display:none">
             <div class="series-label" style="display:flex; justify-content:space-between; align-items:center">
