@@ -365,6 +365,14 @@ class AudioPlayerPlugin(Plugin):
                 self.selected_series = series
             return {"ok": True}
 
+        @self.router.post("/stop_time")
+        async def stop_time_route(request: Request):
+            data = await request.json()
+            time_str = data.get("time", "")
+            if time_str:
+                self.stop_time = parse_time(time_str)
+            return {"ok": True}
+
         app.include_router(self.router)
 
     def ui_section(self) -> str:
@@ -384,9 +392,11 @@ class AudioPlayerPlugin(Plugin):
             <div class="series-pills" id="ap-series-pills"></div>
           </details>
 
-          <details class="collapsible">
-            <summary>Auto-stop at <span id="ap-stop-time" style="color:var(--accent);font-weight:600">--:--</span></summary>
-          </details>
+          <div class="auto-stop-row">
+            <span class="auto-stop-label">Auto-stop</span>
+            <span class="auto-stop-value" id="ap-stop-time-display" onclick="apEditStopTime()">--:--</span>
+            <input type="time" id="ap-stop-time-input" style="display:none" onchange="apSaveStopTime()">
+          </div>
 
           <div class="transport">
             <button class="transport-btn transport-play" onclick="apToggle()" id="ap-play-btn">&#x25B6;</button>
@@ -422,6 +432,17 @@ class AudioPlayerPlugin(Plugin):
             "  await apFetch('/api/audio_player/volume', { volume: parseInt(val) });\n"
             "}\n"
             "function apSelectSeries(name) { apFetch('/api/audio_player/select_series', { series: name }); }\n"
+"function apEditStopTime() {\n"
+"  var input = document.getElementById('ap-stop-time-input');\n"
+"  if (input.showPicker) input.showPicker(); else input.click();\n"
+"}\n"
+"async function apSaveStopTime() {\n"
+"  var val = document.getElementById('ap-stop-time-input').value;\n"
+"  if (val) {\n"
+"    document.getElementById('ap-stop-time-display').textContent = val;\n"
+"    await apFetch('/api/audio_player/stop_time', { time: val });\n"
+"  }\n"
+"}\n"
             "async function apPoll() {\n"
             "  try {\n"
             "    const r = await fetch('/api/audio_player/status');\n"
@@ -434,7 +455,8 @@ class AudioPlayerPlugin(Plugin):
             "      var label = ({playing:'Playing', paused:'Paused', preparing:'Preparing...'})[s.state] || s.state;\n"
             "      statusEl.textContent = label + ': ' + (s.current_series || '?') + ' \\u00B7 ' + (s.current_index || 0) + '/' + (s.total_in_series || 0);\n"
             "    }\n"
-            "    document.getElementById('ap-stop-time').textContent = s.stop_time || '--:--';\n"
+            "    document.getElementById('ap-stop-time-display').textContent = s.stop_time || '--:--';\n"
+            "    document.getElementById('ap-stop-time-input').value = s.stop_time || '--:--';\n"
             "    var playBtn = document.getElementById('ap-play-btn');\n"
             "    if (s.state === 'idle') {\n"
             "      playBtn.innerHTML = '\\u25B6';\n"

@@ -133,6 +133,17 @@
   .series-pill:active { transform: scale(0.95); }
   .series-pill:disabled { opacity: 0.35; cursor: default; pointer-events: none; }
 
+  .auto-stop-row {
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--card); border-radius: var(--radius); padding: 12px 16px;
+    margin-bottom: 12px;
+  }
+  .auto-stop-label { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; }
+  .auto-stop-value {
+    font-size: 20px; font-weight: 500; color: var(--accent); cursor: pointer;
+    padding: 4px 12px; border-radius: 8px; transition: background 0.2s; user-select: none;
+  }
+  .auto-stop-value:active { background: var(--card-hover); }
   .alarm-volume-row { margin-top: 12px; margin-bottom: 12px; }
 
   .yt-ch-label {
