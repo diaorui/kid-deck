@@ -59,7 +59,7 @@ class AudioPlayerPlugin(Plugin):
         self.audio_files_by_series: dict[str, list[Path]] = {}
         self.pcm_cache: dict[Path, bytes] = {}
         self.series_order: list[str] = []
-        self.selected_series = ""
+        self.selected_series = config.get("selected_series", "")
 
     def _past_stop_time(self) -> bool:
         now = datetime.now().time()
@@ -70,6 +70,22 @@ class AudioPlayerPlugin(Plugin):
         if now.hour < 6:
             return False
         return now >= self.stop_time
+
+    def _save_config(self):
+        path = Path(__file__).resolve().parent.parent / "config.yaml"
+        try:
+            import yaml
+            with open(path) as f:
+                cfg = yaml.safe_load(f) or {}
+            if "plugins" not in cfg:
+                cfg["plugins"] = {}
+            if "audio_player" not in cfg["plugins"]:
+                cfg["plugins"]["audio_player"] = {}
+            cfg["plugins"]["audio_player"]["selected_series"] = self.selected_series
+            with open(path, "w") as f:
+                yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+        except Exception as e:
+            print(f"Audio player: failed to save config: {e}", flush=True)
 
     def scan_files(self):
         patterns = ["*.mp3", "*.MP3", "*.wav", "*.WAV"]
@@ -363,6 +379,7 @@ class AudioPlayerPlugin(Plugin):
             series = data.get("series", "")
             if not series or series in self.audio_files_by_series:
                 self.selected_series = series
+                self._save_config()
             return {"ok": True}
 
         @self.router.post("/stop_time")
@@ -387,16 +404,16 @@ class AudioPlayerPlugin(Plugin):
             <span class="vol-value" id="ap-volume-display">60</span>
           </div>
 
-          <details class="collapsible">
-            <summary>Series</summary>
-            <div class="series-pills" id="ap-series-pills"></div>
-          </details>
-
           <div class="auto-stop-row">
             <span class="auto-stop-label">Auto-stop</span>
             <span class="auto-stop-value" id="ap-stop-time-display" onclick="apEditStopTime()">--:--</span>
             <input type="time" id="ap-stop-time-input" style="display:none" onchange="apSaveStopTime()">
           </div>
+
+          <details class="collapsible">
+            <summary>Series</summary>
+            <div class="series-pills" id="ap-series-pills"></div>
+          </details>
 
           <div class="transport">
             <button class="transport-btn transport-play" onclick="apToggle()" id="ap-play-btn">&#x25B6;</button>
