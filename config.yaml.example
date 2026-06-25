@@ -26,6 +26,5 @@ plugins:
       stop_time: "23:00"
 
   yt_cast:
-    channels: []             # YouTube channel handles, e.g. "@channelname"
-    channel_enabled: {}
+    channel_enabled: {}      # YouTube channel handles + enabled state, e.g. "@channelname": true
     uncast_duration: 40      # Auto-stop after N minutes (0 = no auto-stop)

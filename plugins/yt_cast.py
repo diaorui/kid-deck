@@ -85,15 +85,14 @@ class YTCastPlugin(Plugin):
     def __init__(self, controller, config: dict):
         super().__init__(controller, config)
 
-        self.channels: list[str] = list(config.get("channels", []))
         self.uncast_duration: int = config.get("uncast_duration", 40)
 
         self.status = "disconnected"
         self.device_name = ""
         self.queue: list[dict] = []
         self.current_index = -1
-        saved = config.get("channel_enabled", {})
-        self.channel_enabled: dict[str, bool] = {ch: saved.get(ch, True) for ch in self.channels}
+        self.channel_enabled: dict[str, bool] = dict(config.get("channel_enabled", {}))
+        self.channels: list[str] = list(self.channel_enabled.keys()) or list(config.get("channels", []))
         self.cast_start_time: float = 0
 
         self._cast: pychromecast.Chromecast | None = None
@@ -201,7 +200,6 @@ class YTCastPlugin(Plugin):
             if "plugins" not in cfg:
                 cfg["plugins"] = {}
             cfg["plugins"]["yt_cast"] = {
-                "channels": self.channels,
                 "uncast_duration": self.uncast_duration,
                 "channel_enabled": dict(self.channel_enabled),
             }
