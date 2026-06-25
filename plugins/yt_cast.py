@@ -465,6 +465,28 @@ class YTCastPlugin(Plugin):
             self._save_config()
             return {"ok": True}
 
+        @self.router.post("/add_channel")
+        async def add_channel(request: Request):
+            import asyncio
+            data = await request.json()
+            handle = data.get("handle", "").strip()
+            if not handle:
+                return {"ok": False, "error": "Enter a channel handle"}
+            if not handle.startswith("@"):
+                handle = "@" + handle
+            with self._lock:
+                if handle in self.channel_enabled:
+                    return {"ok": False, "error": "Channel already added"}
+            loop = asyncio.get_event_loop()
+            cid = await loop.run_in_executor(None, _resolve_channel_id, handle)
+            if cid is None:
+                return {"ok": False, "error": "Channel not found \u2014 check spelling"}
+            with self._lock:
+                self.channel_enabled[handle] = True
+                self.channels = list(self.channel_enabled.keys())
+            self._save_config()
+            return {"ok": True, "handle": handle}
+
         app.include_router(self.router)
 
     def ui_section(self) -> str:
@@ -481,6 +503,10 @@ class YTCastPlugin(Plugin):
           <details class="collapsible" id="yt-channels-section">
             <summary>Channels</summary>
             <div class="series-pills" id="yt-channel-pills"></div>
+            <div class="yt-add-channel-row">
+              <input type="text" id="yt-add-input" placeholder="@channelname" maxlength="100" onkeydown="if(event.key==='Enter')ytAddChannel()">
+              <button onclick="ytAddChannel()">+ Add</button>
+            </div>
           </details>
 
           <div class="transport" id="yt-controls" style="gap:12px">
@@ -585,6 +611,25 @@ class YTCastPlugin(Plugin):
           const r = await ytFetch('/api/yt_cast/toggle_channel', { handle: handle, enabled: enabled });
           ytPoll();
           if (!r || !r.ok) { ytShowError(r ? r.error : 'Toggle failed'); }
+        }
+
+        async function ytAddChannel() {
+          ytHideError();
+          const input = document.getElementById('yt-add-input');
+          const btn = document.querySelector('.yt-add-channel-row button');
+          const handle = input.value.trim();
+          if (!handle) return;
+          btn.disabled = true;
+          btn.textContent = 'Adding\u2026';
+          const r = await ytFetch('/api/yt_cast/add_channel', { handle: handle });
+          btn.disabled = false;
+          btn.textContent = '+ Add';
+          if (r && r.ok) {
+            input.value = '';
+            ytPoll();
+          } else {
+            ytShowError(r ? r.error : 'Failed to add channel');
+          }
         }
 
         function ytRenderQueue(s) {

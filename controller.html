@@ -171,6 +171,21 @@
   .yt-queue-item.playing .yt-qi-date,
   .yt-queue-item.playing .yt-qi-handle,
   .yt-queue-item.playing .yt-qi-dur { color: rgba(255,255,255,0.7); }
+  .yt-add-channel-row {
+    display: flex; gap: 8px; margin-top: 12px;
+  }
+  .yt-add-channel-row input {
+    flex: 1; padding: 10px 12px; border: 1px solid #333; border-radius: 8px;
+    background: var(--bg); color: var(--text); font-size: 14px; outline: none;
+  }
+  .yt-add-channel-row input:focus { border-color: var(--accent); }
+  .yt-add-channel-row button {
+    padding: 10px 16px; border: none; border-radius: 8px;
+    background: var(--accent); color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+    transition: all 0.2s;
+  }
+  .yt-add-channel-row button:active { transform: scale(0.95); }
+  .yt-add-channel-row button:disabled { opacity: 0.5; }
   .alarm-header {
     display: flex; align-items: center; justify-content: space-between;
     margin-bottom: 12px;
