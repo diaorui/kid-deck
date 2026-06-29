@@ -603,20 +603,46 @@ class PodcastPlugin(Plugin):
         }
 
         var pcQueueFingerprint = '';
+        var pcPrevIndex = -1;
         function pcRenderQueue(s) {
           const container = document.getElementById('pc-queue-list');
-          if (!s.queue || !s.queue.length) {
+          const idx = s.current_index;
+          const isEmpty = !s.queue || !s.queue.length;
+          if (isEmpty) {
+            pcQueueFingerprint = '';
+            pcPrevIndex = -1;
             container.innerHTML =
               '<div style="color:var(--text-dim);font-size:13px;padding:16px 0;text-align:center">Loading episodes\u2026</div>';
             return;
           }
           var fp = JSON.stringify(s.queue.map(function(v) { return v.url; }));
-          if (fp === pcQueueFingerprint) return;
+          var sameData = fp === pcQueueFingerprint;
+          var sameIdx = idx === pcPrevIndex;
+          if (sameData && sameIdx) return;
+
+          if (sameData) {
+            var oldIdx = pcPrevIndex;
+            pcPrevIndex = idx;
+            var oldRow = oldIdx >= 0 && oldIdx < container.children.length
+              ? container.children[oldIdx] : null;
+            if (oldRow) { oldRow.className = 'yt-queue-item'; oldRow.querySelector('.yt-qi-indicator').innerHTML = ''; }
+            var newRow = idx >= 0 && idx < container.children.length
+              ? container.children[idx] : null;
+            if (newRow) {
+              newRow.className = 'yt-queue-item' + (s.status === 'playing' ? ' playing' : '') + ' current';
+              newRow.querySelector('.yt-qi-indicator').innerHTML = s.status === 'playing' ? '&#x25B6;' : '&#x2022;';
+              newRow.scrollIntoView({ block: 'nearest' });
+            }
+            return;
+          }
+
           pcQueueFingerprint = fp;
+          pcPrevIndex = idx;
+
           let html = '';
           for (let i = 0; i < s.queue.length; i++) {
             const v = s.queue[i];
-            const isCurrent = i === s.current_index;
+            const isCurrent = i === idx;
             const playing = isCurrent && s.status === 'playing';
             const cls = 'yt-queue-item' + (playing ? ' playing' : '') + (isCurrent ? ' current' : '');
             const indicator = playing ? '&#x25B6;' : (isCurrent ? '&#x2022;' : '');
@@ -635,8 +661,8 @@ class PodcastPlugin(Plugin):
               '</div>';
           }
           container.innerHTML = html;
-          if (s.current_index >= 0 && s.current_index < s.queue.length) {
-            var el = container.children[s.current_index];
+          if (idx >= 0 && idx < s.queue.length) {
+            var el = container.children[idx];
             if (el) el.scrollIntoView({ block: 'nearest' });
           }
         }
