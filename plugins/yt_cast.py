@@ -78,7 +78,7 @@ def _fetch_channel_videos(channel_id: str) -> list[dict]:
 
 class YTCastPlugin(Plugin):
     name = "yt_cast"
-    title = "YouTube TV"
+    title = "TV"
     icon = "📺"
     order = 2
 
