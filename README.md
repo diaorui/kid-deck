@@ -7,13 +7,14 @@ Plugin-based controller for kids' media. Audio stories, YouTube casting, alarms 
 - **Audio Player** — Stream PCM audio to the camera via SSH. Plays story series (shuffled or selected). Volume control, auto-stop schedule.
 - **Alarm** — Schedule alarms that play audio at set times, with day-of-week selection. Android-style toggle switch UI.
 - **YouTube TV** — Cast curated YouTube videos to a Chromecast/Google TV device. Channel toggles, auto-skip unavailable videos, auto-stop timer, queue management.
+- **Podcasts** — RSS podcast feeds cast to Chromecast as audio. Add/remove/toggle feeds from UI, top-20 queue by publish date, auto-advance through episodes.
 
 ## Requirements
 
 - Python 3.10+
 - `ffmpeg` on PATH (audio-to-PCM conversion)
 - Thingino IP camera with `play` (SoX) via SSH — for Audio Player and Alarm
-- Chromecast/Google TV on the same network — for YouTube TV
+- Chromecast/Google TV on the same network — for YouTube TV and Podcasts
 - [Deno](https://deno.land) — for reliable YouTube video extraction (`curl -fsSL https://deno.land/install.sh | sh`)
 
 ## Setup
@@ -33,8 +34,9 @@ cp config.yaml.example config.yaml
 | `camera` | `user` | Camera SSH user (default: `root`) |
 | `audio_player` | `folder` | Path to story series directories |
 | `audio_player.schedule` | `stop_time` | Auto-stop time (24h format, e.g. `23:00`) |
-| `yt_cast` | `channels` | List of YouTube channel handles to fetch from |
+| `yt_cast` | `channel_enabled` | Dict of YouTube channel handle → enabled (true/false) |
 | `yt_cast` | `uncast_duration` | Auto-stop casting after N minutes (0 = disabled) |
+| `podcast_player` | `feeds` | Dict of feed name → `{url, enabled}` |
 
 ## Usage
 
@@ -75,6 +77,7 @@ Built-in plugins:
 - `audio_player.py` (order 0) — Audio streaming and series playback
 - `alarm.py` (order 1) — Scheduled alarms with volume control
 - `yt_cast.py` (order 2) — YouTube Chromecast controller
+- `podcast_player.py` (order 3) — RSS podcast Chromecast controller
 
 ## Restart
 
