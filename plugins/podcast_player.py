@@ -134,8 +134,7 @@ class PodcastPlugin(Plugin):
         self.device_name = ""
         self.queue: list[dict] = []
         self.current_index = -1
-        self.feed_urls: dict[str, str] = dict(config.get("feed_urls", {}))
-        self.feed_enabled: dict[str, bool] = dict(config.get("feed_enabled", {k: True for k in self.feed_urls}))
+        self.feeds: dict[str, dict] = dict(config.get("feeds", {}))
 
         self._cast: pychromecast.Chromecast | None = None
         self._browser: pychromecast.discovery.CastBrowser | None = None
@@ -185,7 +184,7 @@ class PodcastPlugin(Plugin):
     def _apply_feed_filter(self):
         if not self.queue:
             return
-        filtered = [v for v in self.queue if self.feed_enabled.get(v["feed_name"], True)]
+        filtered = [v for v in self.queue if self.feeds.get(v["feed_name"], {}).get("enabled", True)]
         if not filtered:
             self.queue = []
             self._do_stop()
@@ -210,8 +209,7 @@ class PodcastPlugin(Plugin):
             if "plugins" not in cfg:
                 cfg["plugins"] = {}
             cfg["plugins"]["podcast_player"] = {
-                "feed_urls": dict(self.feed_urls),
-                "feed_enabled": dict(self.feed_enabled),
+                "feeds": {name: {"url": info["url"], "enabled": info["enabled"]} for name, info in self.feeds.items()},
             }
             with open(path, "w") as f:
                 yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
@@ -310,8 +308,7 @@ class PodcastPlugin(Plugin):
                     "current_index": self.current_index,
                     "current": current,
                     "queue_count": len(self.queue),
-                    "feed_enabled": dict(self.feed_enabled),
-                    "feed_urls": dict(self.feed_urls),
+                    "feeds": {name: dict(info) for name, info in self.feeds.items()},
                 }
 
         @self.router.post("/connect")
@@ -342,8 +339,8 @@ class PodcastPlugin(Plugin):
             loop = asyncio.get_event_loop()
 
             def _do_refresh():
-                enabled = {name: url for name, url in self.feed_urls.items()
-                           if self.feed_enabled.get(name, True)}
+                enabled = {name: info["url"] for name, info in self.feeds.items()
+                           if info.get("enabled", True)}
                 if not enabled:
                     return []
                 result = []
@@ -427,8 +424,8 @@ class PodcastPlugin(Plugin):
             feed_name = data.get("feed_name", "")
             enabled = data.get("enabled", True)
             with self._lock:
-                if feed_name in self.feed_enabled:
-                    self.feed_enabled[feed_name] = enabled
+                if feed_name in self.feeds:
+                    self.feeds[feed_name]["enabled"] = enabled
                     self._apply_feed_filter()
             self._save_config()
             return {"ok": True}
@@ -442,10 +439,9 @@ class PodcastPlugin(Plugin):
             if not url.startswith("http://") and not url.startswith("https://"):
                 return {"ok": False, "error": "URL must start with http:// or https://"}
             with self._lock:
-                if url in self.feed_urls.values():
-                    for name, fu in self.feed_urls.items():
-                        if fu == url:
-                            return {"ok": False, "error": f"Feed already added as \"{name}\""}
+                for name, info in self.feeds.items():
+                    if info["url"] == url:
+                        return {"ok": False, "error": f"Feed already added as \"{name}\""}
 
             import asyncio
             loop = asyncio.get_event_loop()
@@ -455,10 +451,9 @@ class PodcastPlugin(Plugin):
             feed_title = result["title"]
 
             with self._lock:
-                if feed_title in self.feed_urls:
+                if feed_title in self.feeds:
                     return {"ok": False, "error": f"Feed \"{feed_title}\" already exists"}
-                self.feed_urls[feed_title] = url
-                self.feed_enabled[feed_title] = True
+                self.feeds[feed_title] = {"url": url, "enabled": True}
             self._save_config()
             return {"ok": True, "feed_name": feed_title}
 
@@ -467,10 +462,9 @@ class PodcastPlugin(Plugin):
             data = await request.json()
             feed_name = data.get("feed_name", "")
             with self._lock:
-                if feed_name not in self.feed_urls:
+                if feed_name not in self.feeds:
                     return {"ok": False, "error": "Feed not found"}
-                del self.feed_urls[feed_name]
-                self.feed_enabled.pop(feed_name, None)
+                del self.feeds[feed_name]
                 self._apply_feed_filter()
             self._save_config()
             return {"ok": True}
@@ -645,13 +639,13 @@ class PodcastPlugin(Plugin):
 
         function pcRenderFeeds(s) {
           const container = document.getElementById('pc-feed-pills');
-          if (!s.feed_enabled) return;
-          const names = Object.keys(s.feed_enabled);
+          if (!s.feeds) return;
+          const names = Object.keys(s.feeds);
           container.innerHTML = names.map(function(n) {
-            const checked = s.feed_enabled[n];
+            const checked = s.feeds[n].enabled;
             return '<label class="yt-ch-label' + (checked ? ' active' : '') + '" ' +
               'onclick="pcToggleFeed(\\'' + n.replace(/'/g, "\\\\'") + '\\', ' + (!checked) + ')" ' +
-              'title="' + (s.feed_urls[n] || '') + '">' +
+              'title="' + (s.feeds[n].url || '') + '">' +
               n.substring(0, 20) + '</label>';
           }).join('');
         }
