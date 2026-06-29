@@ -25,6 +25,10 @@ plugins:
     schedule:
       stop_time: "23:00"
 
+  podcast_player:
+    feed_urls: {}            # Podcast RSS feed URLs, e.g. "Story Pirates": "https://feeds.megaphone.fm/storypirates"
+    feed_enabled: {}         # Feed enabled state, e.g. "Story Pirates": true
+
   yt_cast:
     channel_enabled: {}      # YouTube channel handles + enabled state, e.g. "@channelname": true
     uncast_duration: 40      # Auto-stop after N minutes (0 = no auto-stop)

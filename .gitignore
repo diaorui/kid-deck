@@ -20,6 +20,10 @@ cache/
 stories/
 test/
 
+# Preview / audition files
+preview/
+preview_feeds.py
+
 # Personal / one-off scripts
 scripts/
 generate_ct_voxcpm.py
