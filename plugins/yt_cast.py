@@ -632,6 +632,7 @@ class YTCastPlugin(Plugin):
           }
         }
 
+        var ytQueueFingerprint = '';
         function ytRenderQueue(s) {
           const container = document.getElementById('yt-queue-list');
           if (!s.queue || !s.queue.length) {
@@ -639,6 +640,9 @@ class YTCastPlugin(Plugin):
               '<div style="color:var(--text-dim);font-size:13px;padding:16px 0;text-align:center">Loading videos\u2026</div>';
             return;
           }
+          var fp = JSON.stringify(s.queue.map(function(v) { return v.url; }));
+          if (fp === ytQueueFingerprint) return;
+          ytQueueFingerprint = fp;
           let html = '';
           for (let i = 0; i < s.queue.length; i++) {
             const v = s.queue[i];
