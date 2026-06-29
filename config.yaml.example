@@ -26,7 +26,7 @@ plugins:
       stop_time: "23:00"
 
   podcast_player:
-    feeds: {}                # Podcast RSS feeds, e.g. "Story Pirates": {url: "https://feeds.megaphone.fm/storypirates", enabled: true}
+    feeds: {}                # Podcast RSS feeds, e.g. "My feed": {url: "https://example.com/feed.xml", enabled: true}
 
   yt_cast:
     channel_enabled: {}      # YouTube channel handles + enabled state, e.g. "@channelname": true

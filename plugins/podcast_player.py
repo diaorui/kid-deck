@@ -75,6 +75,14 @@ def _validate_feed(url: str) -> dict:
             except requests.RequestException as e:
                 return {"ok": False, "error": f"Audio file unreachable: {e}"}
         if not ok:
+            try:
+                rf = requests.get(sample_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10, stream=True)
+                if rf.status_code == 200:
+                    head = rf.raw.read(20)
+                    ok = head[:3] in (b"ID3", b"RIFF") or b"ftyp" in head[:12] or "audio" in (rf.headers.get("content-type") or "")
+            except requests.RequestException:
+                pass
+        if not ok:
             return {"ok": False, "error": "Audio file not accessible"}
     else:
         return {"ok": False, "error": "No audio content found in any episode"}
