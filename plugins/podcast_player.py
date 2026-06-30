@@ -639,7 +639,12 @@ class PodcastPlugin(Plugin):
             if (newRow) {
               newRow.className = 'yt-queue-item' + (s.status === 'playing' ? ' playing' : '') + ' current';
               newRow.querySelector('.yt-qi-indicator').innerHTML = s.status === 'playing' ? '&#x25B6;' : '&#x2022;';
-              newRow.scrollIntoView({ block: 'nearest' });
+              var durEl = newRow.querySelector('.yt-qi-dur');
+              if (durEl && !durEl.textContent && s.queue[idx] && s.queue[idx].duration) {
+                var min = Math.floor(s.queue[idx].duration / 60);
+                var sec = s.queue[idx].duration % 60;
+                durEl.textContent = min + ':' + (sec < 10 ? '0' : '') + sec;
+              }
             }
             return;
           }
