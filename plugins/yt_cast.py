@@ -125,6 +125,19 @@ class YTCastPlugin(Plugin):
             print(f"YT Cast: failed to resolve {video_id}: {e}", flush=True)
             return None
 
+    def _pre_resolve(self):
+        time.sleep(2)
+        with self._lock:
+            start = max(0, self.current_index + 1 if self.current_index >= 0 else 0)
+            targets = [(i, self.queue[i]["video_id"]) for i in range(start, min(start + 3, len(self.queue)))]
+        for i, vid in targets:
+            if self._stop_event.is_set():
+                return
+            video_id = vid
+            if video_id not in self._url_cache and video_id not in self._duration_cache:
+                self._resolve_url(video_id)
+            time.sleep(1.5)
+
     def _discover(self) -> pychromecast.Chromecast | None:
         try:
             chromecasts, browser = pychromecast.get_chromecasts()
@@ -388,6 +401,7 @@ class YTCastPlugin(Plugin):
                 self.queue = queue
                 self.current_index = -1 if self.status != "playing" else self.current_index
             print(f"YT Cast: refreshed — {len(queue)} videos", flush=True)
+            threading.Thread(target=self._pre_resolve, daemon=True).start()
             return {"ok": True, "queue_count": len(queue)}
 
         @self.router.post("/play")
@@ -569,8 +583,6 @@ class YTCastPlugin(Plugin):
           }
 
           document.getElementById('yt-status').textContent = 'Loading queue\u2026';
-          document.getElementById('yt-queue-list').innerHTML =
-            '<div style="color:var(--text-dim);font-size:13px;padding:16px 0;text-align:center">Loading videos\u2026</div>';
           const r2 = await ytFetch('/api/yt_cast/refresh');
           if (!r2 || !r2.ok || !r2.queue_count) {
             btn.disabled = false; btn.innerHTML = origHTML;
