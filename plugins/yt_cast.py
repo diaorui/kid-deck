@@ -657,7 +657,7 @@ class YTCastPlugin(Plugin):
               '<div style="color:var(--text-dim);font-size:13px;padding:16px 0;text-align:center">Loading videos\u2026</div>';
             return;
           }
-          var fp = JSON.stringify(s.queue.map(function(v) { return v.url; }));
+          var fp = JSON.stringify(s.queue.map(function(v) { return v.video_id + '|' + (v.duration || ''); }));
           var sameData = fp === ytQueueFingerprint;
           var sameIdx = idx === ytPrevIndex;
           if (sameData && sameIdx) return;
