@@ -744,8 +744,7 @@ class YTCastPlugin(Plugin):
               statusEl.innerHTML = txt;
             }
 
-            const connected = s.status !== 'disconnected';
-            document.getElementById('yt-queue-section').style.display = connected ? '' : 'none';
+            document.getElementById('yt-queue-section').style.display = '';
 
             const uncastPills = document.getElementById('yt-uncast-pills');
             if (uncastPills) {
@@ -758,10 +757,8 @@ class YTCastPlugin(Plugin):
             }
 
             ytRenderChannels(s);
-            if (connected) {
-              document.getElementById('yt-queue-count').textContent = (s.queue_count || 0) + ' videos';
-              ytRenderQueue(s);
-            }
+            document.getElementById('yt-queue-count').textContent = (s.queue_count || 0) + ' videos';
+            ytRenderQueue(s);
 
             const playing = s.status === 'playing';
             const playBtn = document.getElementById('yt-play-btn');

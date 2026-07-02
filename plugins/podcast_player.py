@@ -707,14 +707,11 @@ class PodcastPlugin(Plugin):
               statusEl.innerHTML = txt;
             }
 
-            const connected = s.status !== 'disconnected';
-            document.getElementById('pc-queue-section').style.display = connected ? '' : 'none';
+            document.getElementById('pc-queue-section').style.display = '';
 
             pcRenderFeeds(s);
-            if (connected) {
-              document.getElementById('pc-queue-count').textContent = (s.queue_count || 0) + ' episodes';
-              pcRenderQueue(s);
-            }
+            document.getElementById('pc-queue-count').textContent = (s.queue_count || 0) + ' episodes';
+            pcRenderQueue(s);
 
             const playing = s.status === 'playing';
             const playBtn = document.getElementById('pc-play-btn');
