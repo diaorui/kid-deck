@@ -646,7 +646,7 @@ class PodcastPlugin(Plugin):
               var titleEl = newRow.querySelector('.yt-qi-title');
               if (titleEl && s.queue[idx]) {
                 var t = s.queue[idx].title || '', e2 = pcEsc(t);
-                titleEl.innerHTML = '<span class="scroll-wrap" style="--dur:' + Math.max(6, t.length / 6) + 's"><span>' + e2 + '</span><span aria-hidden="true">' + e2 + '</span></span>';
+                titleEl.innerHTML = '<span class="scroll-wrap" style="--dur:' + Math.max(6, t.length / 6) + 's"><span>\u25b8 ' + e2 + '</span><span aria-hidden="true">\u25b8 ' + e2 + '</span></span>';
               }
               var durEl = newRow.querySelector('.yt-qi-dur');
               if (durEl && !durEl.textContent && s.queue[idx] && s.queue[idx].duration) {
@@ -676,7 +676,7 @@ class PodcastPlugin(Plugin):
             }
             var title = v.title || '', escaped2 = pcEsc(title);
             var titleHtml = isCurrent
-              ? '<span class="scroll-wrap" style="--dur:' + Math.max(6, title.length / 6) + 's"><span>' + escaped2 + '</span><span aria-hidden="true">' + escaped2 + '</span></span>'
+              ? '<span class="scroll-wrap" style="--dur:' + Math.max(6, title.length / 6) + 's"><span>\u25b8 ' + escaped2 + '</span><span aria-hidden="true">\u25b8 ' + escaped2 + '</span></span>'
               : escaped2;
             html += '<div class="' + cls + '">' +
               '<span class="yt-qi-indicator">' + indicator + '</span>' +
