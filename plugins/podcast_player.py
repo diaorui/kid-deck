@@ -486,18 +486,6 @@ class PodcastPlugin(Plugin):
             self._save_config()
             return {"ok": True, "feed_name": feed_title}
 
-        @self.router.post("/remove_feed")
-        async def remove_feed(request: Request):
-            data = await request.json()
-            feed_name = data.get("feed_name", "")
-            with self._lock:
-                if feed_name not in self.feeds:
-                    return {"ok": False, "error": "Feed not found"}
-                del self.feeds[feed_name]
-                self._feed_cache.pop(feed_name, None)
-            self._save_config()
-            return {"ok": True}
-
         app.include_router(self.router)
 
     def ui_section(self) -> str:
