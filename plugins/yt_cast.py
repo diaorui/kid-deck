@@ -3,7 +3,6 @@ import os
 import re
 import threading
 import time
-import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,26 +51,26 @@ def _resolve_channel_id(handle: str) -> str | None:
     return None
 
 
-def _fetch_channel_videos(channel_id: str) -> list[dict]:
-    playlist_id = "UULF" + channel_id[2:]
-    r = requests.get(f"https://www.youtube.com/feeds/videos.xml?playlist_id={playlist_id}",
-                     headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-    ns = {"atom": "http://www.w3.org/2005/Atom"}
-    root = ET.fromstring(r.content)
+def _fetch_channel_videos(handle: str, ydl: yt_dlp.YoutubeDL) -> list[dict]:
+    url = f"https://www.youtube.com/{handle}/videos"
+    info = ydl.extract_info(url, download=False)
+    entries = info.get("entries", [])
     videos = []
-    for entry in root.findall("atom:entry", ns):
-        title = entry.find("atom:title", ns).text
-        video_id = entry.find("atom:id", ns).text.split(":")[-1]
-        published = entry.find("atom:published", ns).text
-        link = entry.find("atom:link", ns).attrib["href"]
-        dt = datetime.fromisoformat(published.replace("Z", "+00:00"))
+    for entry in entries:
+        if not entry or entry.get("media_type") != "video":
+            continue
+        vid = entry.get("id")
+        dur = entry.get("duration", 0)
+        ts = entry.get("timestamp")
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc) if ts else datetime.now(timezone.utc)
         videos.append({
-            "title": title,
-            "video_id": video_id,
+            "title": entry.get("title", ""),
+            "video_id": vid,
             "published": dt,
             "published_str": dt.strftime("%m/%d"),
-            "link": link,
-            "handle": "",
+            "link": f"https://youtube.com/watch?v={vid}",
+            "handle": handle,
+            "duration": dur,
         })
     return videos
 
@@ -109,6 +108,7 @@ class YTCastPlugin(Plugin):
         self._ydl = yt_dlp.YoutubeDL({
             'format': '18',
             'quiet': True,
+            'playlistend': 5,
             'remote_components': ['ejs:github'],
             'extractor_args': {'youtube': ['player_client=web']},
         })
@@ -147,15 +147,11 @@ class YTCastPlugin(Plugin):
                 if self._feed_stop_event.is_set():
                     return
                 try:
-                    cid = _resolve_channel_id(handle)
-                    if cid is None:
-                        print(f"YT Cast feed: could not resolve {handle}", flush=True)
-                    else:
-                        videos = _fetch_channel_videos(cid)
+                    videos = _fetch_channel_videos(handle, self._ydl)
+                    with self._lock:
+                        self._feed_cache[handle] = videos
                         for v in videos:
-                            v["handle"] = handle
-                        with self._lock:
-                            self._feed_cache[handle] = videos
+                            self._duration_cache[v["video_id"]] = v["duration"]
                 except Exception as e:
                     print(f"YT Cast feed: failed to fetch {handle}: {e}", flush=True)
                 delay = 0.5 if first_pass else self.feed_interval
@@ -393,14 +389,11 @@ class YTCastPlugin(Plugin):
             def _do_refresh():
                 for handle in self.channels:
                     try:
-                        cid = _resolve_channel_id(handle)
-                        if cid is None:
-                            continue
-                        videos = _fetch_channel_videos(cid)
-                        for v in videos:
-                            v["handle"] = handle
+                        videos = _fetch_channel_videos(handle, self._ydl)
                         with self._lock:
                             self._feed_cache[handle] = videos
+                            for v in videos:
+                                self._duration_cache[v["video_id"]] = v["duration"]
                     except Exception as e:
                         print(f"YT Cast: refresh failed for {handle}: {e}", flush=True)
 
