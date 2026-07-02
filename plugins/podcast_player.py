@@ -142,6 +142,7 @@ class PodcastPlugin(Plugin):
         self.device_name = ""
         self.queue: list[dict] = []
         self.current_index = -1
+        self.feed_interval: int = config.get("feed_interval", 60)
         self.feeds: dict[str, dict] = dict(config.get("feeds", {}))
 
         self._cast: pychromecast.Chromecast | None = None
@@ -149,6 +150,9 @@ class PodcastPlugin(Plugin):
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._feed_cache: dict[str, list[dict]] = {}
+        self._feed_thread: threading.Thread | None = None
+        self._feed_stop_event = threading.Event()
 
     def _discover(self) -> pychromecast.Chromecast | None:
         try:
@@ -189,24 +193,35 @@ class PodcastPlugin(Plugin):
             self.status = "connected_idle"
         return "all episodes in queue are unavailable"
 
-    def _apply_feed_filter(self):
-        if not self.queue:
-            return
-        filtered = [v for v in self.queue if self.feeds.get(v["feed_name"], {}).get("enabled", True)]
-        if not filtered:
-            self.queue = []
-            self._do_stop()
-            return
-        if self.current_index >= 0 and self.current_index < len(self.queue):
-            current = self.queue[self.current_index]
-            self.queue = filtered
-            try:
-                self.current_index = next(i for i, v in enumerate(self.queue) if v["url"] == current["url"])
-            except StopIteration:
-                self._do_stop()
-        else:
-            self.queue = filtered
-            self.current_index = -1
+    def _build_preview(self) -> list[dict]:
+        items = []
+        for name, info in self.feeds.items():
+            if info.get("enabled", True):
+                items.extend(self._feed_cache.get(name, []))
+        items.sort(key=lambda v: v["published"], reverse=True)
+        return items[:20]
+
+    def _feed_fetch_loop(self):
+        first_pass = True
+        while not self._feed_stop_event.is_set():
+            with self._lock:
+                feed_list = list(self.feeds.keys())
+            for feed_name in feed_list:
+                if self._feed_stop_event.is_set():
+                    return
+                with self._lock:
+                    info = self.feeds.get(feed_name)
+                if info is None:
+                    continue
+                try:
+                    episodes = _fetch_feed(feed_name, info["url"])
+                    with self._lock:
+                        self._feed_cache[feed_name] = episodes
+                except Exception as e:
+                    print(f"Podcast feed: failed to fetch {feed_name}: {e}", flush=True)
+                delay = 0.5 if first_pass else self.feed_interval
+                self._feed_stop_event.wait(delay)
+            first_pass = False
 
     def _save_config(self):
         path = Path(__file__).resolve().parent.parent / "config.yaml"
@@ -262,6 +277,7 @@ class PodcastPlugin(Plugin):
 
     def _do_stop(self):
         self.current_index = -1
+        self.queue = []
         try:
             if self._cast:
                 mc = self._cast.media_controller
@@ -287,12 +303,18 @@ class PodcastPlugin(Plugin):
 
     def start(self):
         super().start()
+        self._feed_stop_event.clear()
+        self._feed_thread = threading.Thread(target=self._feed_fetch_loop, daemon=True)
+        self._feed_thread.start()
         print("Podcast: ready")
 
     def stop(self):
         self._stop_event.set()
+        self._feed_stop_event.set()
         if self._thread:
             self._thread.join(timeout=5)
+        if self._feed_thread:
+            self._feed_thread.join(timeout=5)
         self._do_disconnect()
         super().stop()
         print("Podcast: stopped")
@@ -304,18 +326,25 @@ class PodcastPlugin(Plugin):
         async def status():
             with self._lock:
                 current = None
-                if self.current_index >= 0 and self.current_index < len(self.queue):
-                    current = dict(self.queue[self.current_index])
-                queue_out = [dict(v) for v in self.queue]
+                if self.status == "playing":
+                    queue = self.queue
+                    curr_idx = self.current_index
+                else:
+                    queue = self._build_preview()
+                    curr_idx = -1
+                if curr_idx >= 0 and curr_idx < len(queue):
+                    current = dict(queue[curr_idx])
+                src_queue = self.queue if self.status == "playing" else queue
+                queue_out = [dict(v) for v in src_queue]
                 for item in queue_out:
                     item["published"] = str(item["published"])
                 return {
                     "status": self.status,
                     "device_name": self.device_name,
                     "queue": queue_out,
-                    "current_index": self.current_index,
+                    "current_index": curr_idx,
                     "current": current,
-                    "queue_count": len(self.queue),
+                    "queue_count": len(queue_out),
                     "feeds": {name: dict(info) for name, info in self.feeds.items()},
                 }
 
@@ -347,31 +376,18 @@ class PodcastPlugin(Plugin):
             loop = asyncio.get_event_loop()
 
             def _do_refresh():
-                enabled = {name: info["url"] for name, info in self.feeds.items()
-                           if info.get("enabled", True)}
-                if not enabled:
-                    return []
-                result = []
-                for feed_name, feed_url in enabled.items():
-                    for attempt in range(2):
-                        try:
-                            episodes = _fetch_feed(feed_name, feed_url)
-                            result.extend(episodes[:5])
-                            break
-                        except Exception as e:
-                            if attempt == 0:
-                                time.sleep(0.5)
-                                continue
-                            print(f"Podcast: failed to fetch {feed_name}: {e}", flush=True)
-                result.sort(key=lambda v: v["published"], reverse=True)
-                return result[:20]
+                for feed_name, info in self.feeds.items():
+                    try:
+                        episodes = _fetch_feed(feed_name, info["url"])
+                        with self._lock:
+                            self._feed_cache[feed_name] = episodes
+                    except Exception as e:
+                        print(f"Podcast: refresh failed for {feed_name}: {e}", flush=True)
 
-            queue = await loop.run_in_executor(None, _do_refresh)
+            await loop.run_in_executor(None, _do_refresh)
             with self._lock:
-                self.queue = queue
-                self.current_index = -1 if self.status != "playing" else self.current_index
-            print(f"Podcast: refreshed — {len(queue)} episodes", flush=True)
-            return {"ok": True, "queue_count": len(queue)}
+                preview = self._build_preview()
+            return {"ok": True, "queue_count": len(preview)}
 
         @self.router.post("/play")
         async def play():
@@ -379,8 +395,12 @@ class PodcastPlugin(Plugin):
             with self._lock:
                 if self._cast is None:
                     return {"ok": False, "error": "not connected"}
-                if not self.queue:
-                    return {"ok": False, "error": "queue empty, refresh first"}
+                if self.status == "playing":
+                    return {"ok": False, "error": "already playing"}
+                queue = self._build_preview()
+                if not queue:
+                    return {"ok": False, "error": "queue empty, try again later"}
+                self.queue = queue
                 self.current_index = 0
                 if self._thread is None or not self._thread.is_alive():
                     self._stop_event.clear()
@@ -391,6 +411,7 @@ class PodcastPlugin(Plugin):
             if err:
                 with self._lock:
                     self.current_index = -1
+                    self.queue = []
                 return {"ok": False, "error": err}
             with self._lock:
                 self.status = "playing"
@@ -434,7 +455,6 @@ class PodcastPlugin(Plugin):
             with self._lock:
                 if feed_name in self.feeds:
                     self.feeds[feed_name]["enabled"] = enabled
-                    self._apply_feed_filter()
             self._save_config()
             return {"ok": True}
 
@@ -462,6 +482,7 @@ class PodcastPlugin(Plugin):
                 if feed_title in self.feeds:
                     return {"ok": False, "error": f"Feed \"{feed_title}\" already exists"}
                 self.feeds[feed_title] = {"url": url, "enabled": True}
+                self._feed_cache[feed_title] = []
             self._save_config()
             return {"ok": True, "feed_name": feed_title}
 
@@ -473,7 +494,7 @@ class PodcastPlugin(Plugin):
                 if feed_name not in self.feeds:
                     return {"ok": False, "error": "Feed not found"}
                 del self.feeds[feed_name]
-                self._apply_feed_filter()
+                self._feed_cache.pop(feed_name, None)
             self._save_config()
             return {"ok": True}
 
@@ -550,17 +571,6 @@ class PodcastPlugin(Plugin):
             btn.disabled = false; btn.innerHTML = origHTML;
             document.getElementById('pc-status').textContent = 'Disconnected';
             pcShowError(r ? r.error : 'Connection failed');
-            return;
-          }
-
-          document.getElementById('pc-status').textContent = 'Loading queue\u2026';
-          document.getElementById('pc-queue-list').innerHTML =
-            '<div style="color:var(--text-dim);font-size:13px;padding:16px 0;text-align:center">Loading episodes\u2026</div>';
-          const r2 = await pcFetch('/api/podcast_player/refresh');
-          if (!r2 || !r2.ok || !r2.queue_count) {
-            btn.disabled = false; btn.innerHTML = origHTML;
-            pcPoll();
-            pcShowError(r2 ? (r2.queue_count ? r2.error : 'No episodes found') : 'Refresh failed');
             return;
           }
 

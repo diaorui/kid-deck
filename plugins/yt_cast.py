@@ -94,12 +94,16 @@ class YTCastPlugin(Plugin):
         self.channel_enabled: dict[str, bool] = dict(config.get("channel_enabled", {}))
         self.channels: list[str] = list(self.channel_enabled.keys()) or list(config.get("channels", []))
         self.cast_start_time: float = 0
+        self.feed_interval: int = config.get("feed_interval", 60)
 
         self._cast: pychromecast.Chromecast | None = None
         self._browser: pychromecast.discovery.CastBrowser | None = None
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._feed_cache: dict[str, list[dict]] = {}
+        self._feed_thread: threading.Thread | None = None
+        self._feed_stop_event = threading.Event()
         self._url_cache: dict[str, str] = {}
         self._duration_cache: dict[str, int] = {}
         self._ydl = yt_dlp.YoutubeDL({
@@ -125,18 +129,38 @@ class YTCastPlugin(Plugin):
             print(f"YT Cast: failed to resolve {video_id}: {e}", flush=True)
             return None
 
-    def _pre_resolve(self):
-        time.sleep(2)
-        with self._lock:
-            start = max(0, self.current_index + 1 if self.current_index >= 0 else 0)
-            targets = [(i, self.queue[i]["video_id"]) for i in range(start, min(start + 3, len(self.queue)))]
-        for i, vid in targets:
-            if self._stop_event.is_set():
-                return
-            video_id = vid
-            if video_id not in self._url_cache and video_id not in self._duration_cache:
-                self._resolve_url(video_id)
-            time.sleep(1.5)
+    def _build_preview(self) -> list[dict]:
+        items = []
+        for handle in self.channels:
+            if not self.channel_enabled.get(handle, True):
+                continue
+            items.extend(self._feed_cache.get(handle, []))
+        items.sort(key=lambda v: v["published"], reverse=True)
+        return items[:20]
+
+    def _feed_fetch_loop(self):
+        first_pass = True
+        while not self._feed_stop_event.is_set():
+            with self._lock:
+                handles = list(self.channels)
+            for handle in handles:
+                if self._feed_stop_event.is_set():
+                    return
+                try:
+                    cid = _resolve_channel_id(handle)
+                    if cid is None:
+                        print(f"YT Cast feed: could not resolve {handle}", flush=True)
+                    else:
+                        videos = _fetch_channel_videos(cid)
+                        for v in videos:
+                            v["handle"] = handle
+                        with self._lock:
+                            self._feed_cache[handle] = videos
+                except Exception as e:
+                    print(f"YT Cast feed: failed to fetch {handle}: {e}", flush=True)
+                delay = 0.5 if first_pass else self.feed_interval
+                self._feed_stop_event.wait(delay)
+            first_pass = False
 
     def _discover(self) -> pychromecast.Chromecast | None:
         try:
@@ -184,25 +208,6 @@ class YTCastPlugin(Plugin):
         with self._lock:
             self.status = "connected_idle"
         return "all videos in queue are unavailable"
-
-    def _apply_channel_filter(self):
-        if not self.queue:
-            return
-        filtered = [v for v in self.queue if self.channel_enabled.get(v["handle"], True)]
-        if not filtered:
-            self.queue = []
-            self._do_stop()
-            return
-        if self.current_index >= 0 and self.current_index < len(self.queue):
-            current = self.queue[self.current_index]
-            self.queue = filtered
-            try:
-                self.current_index = next(i for i, v in enumerate(self.queue) if v["video_id"] == current["video_id"])
-            except StopIteration:
-                self._do_stop()
-        else:
-            self.queue = filtered
-            self.current_index = -1
 
     def _save_config(self):
         path = Path(__file__).resolve().parent.parent / "config.yaml"
@@ -274,6 +279,7 @@ class YTCastPlugin(Plugin):
     def _do_stop(self):
         self.cast_start_time = 0
         self.current_index = -1
+        self.queue = []
         try:
             if self._cast:
                 mc = self._cast.media_controller
@@ -299,12 +305,18 @@ class YTCastPlugin(Plugin):
 
     def start(self):
         super().start()
+        self._feed_stop_event.clear()
+        self._feed_thread = threading.Thread(target=self._feed_fetch_loop, daemon=True)
+        self._feed_thread.start()
         print("YT Cast: ready")
 
     def stop(self):
         self._stop_event.set()
+        self._feed_stop_event.set()
         if self._thread:
             self._thread.join(timeout=5)
+        if self._feed_thread:
+            self._feed_thread.join(timeout=5)
         self._do_disconnect()
         super().stop()
         print("YT Cast: stopped")
@@ -317,16 +329,23 @@ class YTCastPlugin(Plugin):
             with self._lock:
                 current = None
                 remaining = 0
-                if self.current_index >= 0 and self.current_index < len(self.queue):
-                    current = dict(self.queue[self.current_index])
+                if self.status == "playing":
+                    queue = self.queue
+                    curr_idx = self.current_index
+                else:
+                    queue = self._build_preview()
+                    curr_idx = -1
+                if curr_idx >= 0 and curr_idx < len(queue):
+                    current = dict(queue[curr_idx])
                     vid = current["video_id"]
                     if current.get("duration") is None and vid in self._duration_cache:
                         current["duration"] = self._duration_cache[vid]
                 if self.status == "playing" and self.cast_start_time > 0 and self.uncast_duration > 0:
                     elapsed = time.time() - self.cast_start_time
                     remaining = max(0, int(self.uncast_duration - elapsed / 60))
+                src_queue = self.queue if self.status == "playing" else queue
                 queue_out = []
-                for v in self.queue:
+                for v in src_queue:
                     item = dict(v)
                     vid = v["video_id"]
                     if item.get("duration") is None and vid in self._duration_cache:
@@ -336,9 +355,9 @@ class YTCastPlugin(Plugin):
                     "status": self.status,
                     "device_name": self.device_name,
                     "queue": queue_out,
-                    "current_index": self.current_index,
+                    "current_index": curr_idx,
                     "current": current,
-                    "queue_count": len(self.queue),
+                    "queue_count": len(queue_out),
                     "channel_enabled": dict(self.channel_enabled),
                     "uncast_duration": self.uncast_duration,
                     "remaining_minutes": remaining,
@@ -372,37 +391,23 @@ class YTCastPlugin(Plugin):
             loop = asyncio.get_event_loop()
 
             def _do_refresh():
-                enabled = [ch for ch in self.channels if self.channel_enabled.get(ch, True)]
-                if not enabled:
-                    return []
-                result = []
-                for handle in enabled:
-                    for attempt in range(2):
-                        try:
-                            cid = _resolve_channel_id(handle)
-                            if cid is None:
-                                break
-                            videos = _fetch_channel_videos(cid)
-                            if videos:
-                                for v in videos:
-                                    v["handle"] = handle
-                                result.extend(videos)
-                                break
-                        except Exception as e:
-                            if attempt == 0:
-                                time.sleep(0.5)
-                                continue
-                            print(f"YT Cast: failed to fetch {handle}: {e}", flush=True)
-                result.sort(key=lambda v: v["published"], reverse=True)
-                return result[:20]
+                for handle in self.channels:
+                    try:
+                        cid = _resolve_channel_id(handle)
+                        if cid is None:
+                            continue
+                        videos = _fetch_channel_videos(cid)
+                        for v in videos:
+                            v["handle"] = handle
+                        with self._lock:
+                            self._feed_cache[handle] = videos
+                    except Exception as e:
+                        print(f"YT Cast: refresh failed for {handle}: {e}", flush=True)
 
-            queue = await loop.run_in_executor(None, _do_refresh)
+            await loop.run_in_executor(None, _do_refresh)
             with self._lock:
-                self.queue = queue
-                self.current_index = -1 if self.status != "playing" else self.current_index
-            print(f"YT Cast: refreshed — {len(queue)} videos", flush=True)
-            threading.Thread(target=self._pre_resolve, daemon=True).start()
-            return {"ok": True, "queue_count": len(queue)}
+                preview = self._build_preview()
+            return {"ok": True, "queue_count": len(preview)}
 
         @self.router.post("/play")
         async def play():
@@ -410,8 +415,12 @@ class YTCastPlugin(Plugin):
             with self._lock:
                 if self._cast is None:
                     return {"ok": False, "error": "not connected"}
-                if not self.queue:
-                    return {"ok": False, "error": "queue empty, refresh first"}
+                if self.status == "playing":
+                    return {"ok": False, "error": "already playing"}
+                queue = self._build_preview()
+                if not queue:
+                    return {"ok": False, "error": "queue empty, try again later"}
+                self.queue = queue
                 self.current_index = 0
                 if self._thread is None or not self._thread.is_alive():
                     self._stop_event.clear()
@@ -422,6 +431,7 @@ class YTCastPlugin(Plugin):
             if err:
                 with self._lock:
                     self.current_index = -1
+                    self.queue = []
                 return {"ok": False, "error": err}
             with self._lock:
                 self.cast_start_time = time.time()
@@ -475,7 +485,6 @@ class YTCastPlugin(Plugin):
             with self._lock:
                 if handle in self.channel_enabled:
                     self.channel_enabled[handle] = enabled
-                    self._apply_channel_filter()
             self._save_config()
             return {"ok": True}
 
@@ -498,6 +507,7 @@ class YTCastPlugin(Plugin):
             with self._lock:
                 self.channel_enabled[handle] = True
                 self.channels = list(self.channel_enabled.keys())
+                self._feed_cache[handle] = []
             self._save_config()
             return {"ok": True, "handle": handle}
 
@@ -579,15 +589,6 @@ class YTCastPlugin(Plugin):
             btn.disabled = false; btn.innerHTML = origHTML;
             document.getElementById('yt-status').textContent = 'Disconnected';
             ytShowError(r ? r.error : 'Connection failed');
-            return;
-          }
-
-          document.getElementById('yt-status').textContent = 'Loading queue\u2026';
-          const r2 = await ytFetch('/api/yt_cast/refresh');
-          if (!r2 || !r2.ok || !r2.queue_count) {
-            btn.disabled = false; btn.innerHTML = origHTML;
-            ytPoll();
-            ytShowError(r2 ? (r2.queue_count ? r2.error : 'No videos found') : 'Refresh failed');
             return;
           }
 
