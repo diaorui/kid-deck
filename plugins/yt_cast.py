@@ -638,6 +638,7 @@ class YTCastPlugin(Plugin):
           }
         }
 
+        function ytEsc(s) { return (''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
         var ytQueueFingerprint = '';
         var ytPrevIndex = -1;
         function ytRenderQueue(s) {
@@ -661,12 +662,22 @@ class YTCastPlugin(Plugin):
             ytPrevIndex = idx;
             var oldRow = oldIdx >= 0 && oldIdx < container.children.length
               ? container.children[oldIdx] : null;
-            if (oldRow) { oldRow.className = 'yt-queue-item'; oldRow.querySelector('.yt-qi-indicator').innerHTML = ''; }
+            if (oldRow) {
+              oldRow.className = 'yt-queue-item';
+              oldRow.querySelector('.yt-qi-indicator').innerHTML = '';
+              var oldTitleEl = oldRow.querySelector('.yt-qi-title');
+              if (oldTitleEl && s.queue[oldIdx]) oldTitleEl.innerHTML = ytEsc(s.queue[oldIdx].title || '');
+            }
             var newRow = idx >= 0 && idx < container.children.length
               ? container.children[idx] : null;
             if (newRow) {
               newRow.className = 'yt-queue-item' + (s.status === 'playing' ? ' playing' : '') + ' current';
               newRow.querySelector('.yt-qi-indicator').innerHTML = s.status === 'playing' ? '&#x25B6;' : '&#x2022;';
+              var titleEl = newRow.querySelector('.yt-qi-title');
+              if (titleEl && s.queue[idx]) {
+                var t = s.queue[idx].title || '', e2 = ytEsc(t);
+                titleEl.innerHTML = '<span class="scroll-wrap" style="--dur:' + Math.max(6, t.length / 6) + 's"><span>' + e2 + '</span><span aria-hidden="true">' + e2 + '</span></span>';
+              }
               var durEl = newRow.querySelector('.yt-qi-dur');
               if (durEl && !durEl.textContent && s.queue[idx] && s.queue[idx].duration) {
                 var min = Math.floor(s.queue[idx].duration / 60);
@@ -692,11 +703,15 @@ class YTCastPlugin(Plugin):
               const sec = v.duration % 60;
               dur = m + ':' + (sec < 10 ? '0' : '') + sec;
             }
+            var title = v.title || '', escaped2 = ytEsc(title);
+            var titleHtml = isCurrent
+              ? '<span class="scroll-wrap" style="--dur:' + Math.max(6, title.length / 6) + 's"><span>' + escaped2 + '</span><span aria-hidden="true">' + escaped2 + '</span></span>'
+              : escaped2;
             html += '<div class="' + cls + '">' +
               '<span class="yt-qi-indicator">' + indicator + '</span>' +
               '<span class="yt-qi-date">' + (v.published_str || '') + '</span>' +
-              '<span class="yt-qi-handle">' + (v.handle || '').replace('@', '') + '</span>' +
-              '<span class="yt-qi-title">' + (v.title || '').substring(0, 60) + '</span>' +
+              '<span class="yt-qi-handle">' + ytEsc(v.handle || '').replace('@', '') + '</span>' +
+              '<span class="yt-qi-title">' + titleHtml + '</span>' +
               '<span class="yt-qi-dur">' + dur + '</span>' +
               '</div>';
           }
