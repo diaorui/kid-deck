@@ -181,7 +181,11 @@
     background: var(--accent); color: #fff; font-weight: 500;
   }
   .yt-queue-item.current:not(.playing) { background: var(--card); }
-  .yt-qi-indicator { width: 16px; text-align: center; flex-shrink: 0; font-size: 11px; }
+  .yt-qi-indicator { width: 16px; text-align: center; flex-shrink: 0; font-size: 11px; position: relative; z-index: 1; }
+  .yt-qi-indicator::before {
+    content: ''; position: absolute; inset: -14px; border-radius: 50%;
+  }
+  .yt-queue-item.playing .yt-qi-indicator { cursor: pointer; }
   .yt-qi-date { color: var(--text-dim); flex-shrink: 0; font-size: 11px; width: 32px; }
   .yt-qi-handle { color: var(--text-dim); flex-shrink: 0; font-size: 11px; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .yt-qi-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }

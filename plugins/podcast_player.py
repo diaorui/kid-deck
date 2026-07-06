@@ -199,7 +199,7 @@ class PodcastPlugin(Plugin):
             if info.get("enabled", True):
                 items.extend(self._feed_cache.get(name, []))
         items.sort(key=lambda v: v["published"], reverse=True)
-        return items[:20]
+        return items[:30]
 
     def _feed_fetch_loop(self):
         first_pass = True
@@ -445,6 +445,35 @@ class PodcastPlugin(Plugin):
                     self.current_index = -1
                     self.status = "connected_idle"
                 return {"ok": False, "error": err}
+            return {"ok": True}
+
+        @self.router.post("/seek")
+        async def seek(request: Request):
+            import asyncio
+            data = await request.json()
+            index = int(data.get("index", 0))
+            loop = asyncio.get_event_loop()
+            with self._lock:
+                queue = self.queue if self.status == "playing" else self._build_preview()
+                if index < 0 or index >= len(queue):
+                    return {"ok": False, "error": "out of range"}
+                if self.status == "playing" and self._cast:
+                    await loop.run_in_executor(None, lambda: self._cast.media_controller.stop())
+                self.current_index = index
+                self.queue = list(queue)
+                if self._thread is None or not self._thread.is_alive():
+                    self._stop_event.clear()
+                    self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
+                    self._thread.start()
+            err = await loop.run_in_executor(None, self._play_next)
+            if err:
+                with self._lock:
+                    self.current_index = -1
+                    self.queue = []
+                    self.status = "connected_idle"
+                return {"ok": False, "error": err}
+            with self._lock:
+                self.status = "playing"
             return {"ok": True}
 
         @self.router.post("/toggle_feed")
@@ -742,4 +771,11 @@ class PodcastPlugin(Plugin):
 
         setInterval(pcPoll, 3000);
         pcPoll();
+        document.getElementById('pc-queue-list').addEventListener('click', function(e) {
+          var ind = e.target.closest('.yt-qi-indicator');
+          if (!ind || pcState.status !== 'playing') return;
+          var row = ind.closest('.yt-queue-item');
+          var idx = Array.prototype.indexOf.call(row.parentNode.children, row);
+          if (idx >= 0) pcFetch('/api/podcast_player/seek', { index: idx });
+        });
         """
