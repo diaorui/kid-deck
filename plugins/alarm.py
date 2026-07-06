@@ -363,6 +363,5 @@ class AlarmPlugin(Plugin):
             alarmPoll();
         }
 
-        setInterval(alarmPoll, 3000);
         alarmPoll();
         """
