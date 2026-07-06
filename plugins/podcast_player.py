@@ -663,7 +663,7 @@ class PodcastPlugin(Plugin):
               ? container.children[oldIdx] : null;
             if (oldRow) {
               oldRow.className = 'yt-queue-item';
-              oldRow.querySelector('.yt-qi-indicator').innerHTML = '';
+              oldRow.querySelector('.yt-qi-indicator').innerHTML = '&#x25CB;';
               var oldTitleEl = oldRow.querySelector('.yt-qi-title');
               if (oldTitleEl && s.queue[oldIdx]) oldTitleEl.innerHTML = pcEsc(s.queue[oldIdx].title || '');
             }
@@ -696,7 +696,7 @@ class PodcastPlugin(Plugin):
             const isCurrent = i === idx;
             const playing = isCurrent && s.status === 'playing';
             const cls = 'yt-queue-item' + (playing ? ' playing' : '') + (isCurrent ? ' current' : '');
-            const indicator = playing ? '&#x25B6;' : (isCurrent ? '&#x2022;' : '');
+            const indicator = playing ? '&#x25B6;' : (isCurrent ? '&#x2022;' : '&#x25CB;');
             let dur = '';
             if (v.duration) {
               const m = Math.floor(v.duration / 60);
