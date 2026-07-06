@@ -115,21 +115,21 @@ class YTCastPlugin(Plugin):
             'extractor_args': {'youtube': ['player_client=web']},
         })
 
-    def _resolve_url(self, video_id: str) -> str | None:
+    def _resolve_url(self, video_id: str) -> tuple[str | None, int]:
         if video_id in self._url_cache:
-            return self._url_cache[video_id]
+            return self._url_cache[video_id], self._duration_cache.get(video_id) or 0
         try:
             info = self._ydl.extract_info(f'https://youtube.com/watch?v={video_id}', download=False)
             url = info.get('url')
-            duration = info.get('duration')
+            duration = int(info.get('duration') or 0)
             if url:
                 self._url_cache[video_id] = url
             if duration:
-                self._duration_cache[video_id] = int(duration)
-            return url
+                self._duration_cache[video_id] = duration
+            return url, duration
         except Exception as e:
             print(f"YT Cast: failed to resolve {video_id}: {e}", flush=True)
-            return None
+            return None, 0
 
     def _build_preview(self) -> list[dict]:
         items = []
@@ -187,10 +187,9 @@ class YTCastPlugin(Plugin):
                 video_id = video["video_id"]
                 title = video["title"]
             try:
-                url = self._resolve_url(video_id)
+                url, dur = self._resolve_url(video_id)
                 if url is None:
                     raise RuntimeError(f"could not resolve URL for {video_id}")
-                dur = self._duration_cache.get(video_id)
                 if dur:
                     with self._lock:
                         if self.current_index < len(self.queue):
@@ -198,7 +197,7 @@ class YTCastPlugin(Plugin):
                 mc = self._cast.media_controller
                 mc.play_media(url, 'video/mp4')
                 self._play_start = time.time()
-                self._media_duration_local = dur or 0
+                self._media_duration_local = dur
                 print(f"YT Cast: playing [{self.current_index + 1}/{len(self.queue)}] {title}", flush=True)
                 return None
             except Exception as e:
