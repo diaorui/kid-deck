@@ -756,6 +756,7 @@ class PodcastPlugin(Plugin):
             pcRenderFeeds(s);
             document.getElementById('pc-queue-count').textContent = (s.queue_count || 0) + ' episodes';
             pcRenderQueue(s);
+            document.getElementById('pc-queue-list').classList.toggle('playing-mode', s.status === 'playing');
 
             const playing = s.status === 'playing';
             const playBtn = document.getElementById('pc-play-btn');

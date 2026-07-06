@@ -797,6 +797,7 @@ class YTCastPlugin(Plugin):
             ytRenderChannels(s);
             document.getElementById('yt-queue-count').textContent = (s.queue_count || 0) + ' videos';
             ytRenderQueue(s);
+            document.getElementById('yt-queue-list').classList.toggle('playing-mode', s.status === 'playing');
 
             const playing = s.status === 'playing';
             const playBtn = document.getElementById('yt-play-btn');
