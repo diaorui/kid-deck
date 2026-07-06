@@ -94,6 +94,8 @@ class YTCastPlugin(Plugin):
         self.channels: list[str] = list(self.channel_enabled.keys()) or list(config.get("channels", []))
         self.cast_start_time: float = 0
         self.feed_interval: int = config.get("feed_interval", 60)
+        self._play_start: float = 0
+        self._media_duration_local: int = 0
 
         self._cast: pychromecast.Chromecast | None = None
         self._browser: pychromecast.discovery.CastBrowser | None = None
@@ -195,6 +197,8 @@ class YTCastPlugin(Plugin):
                             self.queue[self.current_index]['duration'] = dur
                 mc = self._cast.media_controller
                 mc.play_media(url, 'video/mp4')
+                self._play_start = time.time()
+                self._media_duration_local = dur or 0
                 print(f"YT Cast: playing [{self.current_index + 1}/{len(self.queue)}] {title}", flush=True)
                 return None
             except Exception as e:
@@ -274,6 +278,8 @@ class YTCastPlugin(Plugin):
 
     def _do_stop(self):
         self.cast_start_time = 0
+        self._play_start = 0
+        self._media_duration_local = 0
         self.current_index = -1
         self.queue = []
         try:
@@ -347,6 +353,7 @@ class YTCastPlugin(Plugin):
                     if item.get("duration") is None and vid in self._duration_cache:
                         item["duration"] = self._duration_cache[vid]
                     queue_out.append(item)
+                elapsed = time.time() - self._play_start if self.status == "playing" and self._play_start > 0 else 0
                 return {
                     "status": self.status,
                     "device_name": self.device_name,
@@ -357,6 +364,8 @@ class YTCastPlugin(Plugin):
                     "channel_enabled": dict(self.channel_enabled),
                     "uncast_duration": self.uncast_duration,
                     "remaining_minutes": remaining,
+                    "media_position": elapsed,
+                    "media_duration": self._media_duration_local,
                 }
 
         @self.router.post("/connect")
@@ -810,6 +819,23 @@ class YTCastPlugin(Plugin):
             }
             document.getElementById('yt-stop-btn').style.display = playing ? '' : 'none';
             document.getElementById('yt-skip-btn').style.display = playing ? '' : 'none';
+
+            var ql = document.getElementById('yt-queue-list');
+            var oldBars = ql.querySelectorAll('.yt-queue-item:not(.playing) .qi-progress');
+            oldBars.forEach(function(el){ el.remove(); });
+            if (s.status === 'playing' && s.media_duration > 0 && s.current_index >= 0) {
+              var row = ql.querySelector('.yt-queue-item.playing');
+              if (row) {
+                var pct = Math.min(100, Math.max(0, (s.media_position || 0) / s.media_duration * 100));
+                var fill = row.querySelector('.qi-progress-fill');
+                if (fill) { fill.style.width = pct + '%'; } else {
+                  var bar = document.createElement('div');
+                  bar.className = 'qi-progress';
+                  bar.innerHTML = '<div class="qi-progress-fill" style="width:' + pct + '%"></div>';
+                  row.appendChild(bar);
+                }
+              }
+            }
           } catch(e) { console.error('YT Cast poll failed', e); }
         }
 

@@ -176,6 +176,9 @@
     padding: 8px 10px; border-radius: 8px; font-size: 13px;
     transition: background 0.2s;
   }
+  .yt-queue-item.playing { position: relative; }
+  .qi-progress { position: absolute; bottom: 0; left: 0; right: 0; height: 3px; overflow: hidden; border-radius: 0 0 8px 8px; }
+  .qi-progress-fill { height: 100%; background: rgba(255,255,255,0.35); transition: width 1s ease; }
   .yt-queue-item:hover { background: var(--card-hover); }
   .yt-queue-item.playing {
     background: var(--accent); color: #fff; font-weight: 500;

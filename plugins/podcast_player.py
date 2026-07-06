@@ -153,6 +153,8 @@ class PodcastPlugin(Plugin):
         self._feed_cache: dict[str, list[dict]] = {}
         self._feed_thread: threading.Thread | None = None
         self._feed_stop_event = threading.Event()
+        self._play_start: float = 0
+        self._media_duration_local: int = 0
 
     def _discover(self) -> pychromecast.Chromecast | None:
         try:
@@ -183,6 +185,8 @@ class PodcastPlugin(Plugin):
             try:
                 mc = self._cast.media_controller
                 mc.play_media(mp3_url, "audio/mpeg")
+                self._play_start = time.time()
+                self._media_duration_local = episode.get("duration", 0)
                 print(f"Podcast: playing [{self.current_index + 1}/{len(self.queue)}] {title}", flush=True)
                 return None
             except Exception as e:
@@ -278,6 +282,8 @@ class PodcastPlugin(Plugin):
     def _do_stop(self):
         self.current_index = -1
         self.queue = []
+        self._play_start = 0
+        self._media_duration_local = 0
         try:
             if self._cast:
                 mc = self._cast.media_controller
@@ -338,6 +344,7 @@ class PodcastPlugin(Plugin):
                 queue_out = [dict(v) for v in src_queue]
                 for item in queue_out:
                     item["published"] = str(item["published"])
+                elapsed = time.time() - self._play_start if self.status == "playing" and self._play_start > 0 else 0
                 return {
                     "status": self.status,
                     "device_name": self.device_name,
@@ -346,6 +353,8 @@ class PodcastPlugin(Plugin):
                     "current": current,
                     "queue_count": len(queue_out),
                     "feeds": {name: dict(info) for name, info in self.feeds.items()},
+                    "media_position": elapsed,
+                    "media_duration": self._media_duration_local,
                 }
 
         @self.router.post("/connect")
@@ -767,6 +776,23 @@ class PodcastPlugin(Plugin):
             }
             document.getElementById('pc-stop-btn').style.display = playing ? '' : 'none';
             document.getElementById('pc-skip-btn').style.display = playing ? '' : 'none';
+
+            var ql = document.getElementById('pc-queue-list');
+            var oldBars = ql.querySelectorAll('.yt-queue-item:not(.playing) .qi-progress');
+            oldBars.forEach(function(el){ el.remove(); });
+            if (s.status === 'playing' && s.media_duration > 0 && s.current_index >= 0) {
+              var row = ql.querySelector('.yt-queue-item.playing');
+              if (row) {
+                var pct = Math.min(100, Math.max(0, (s.media_position || 0) / s.media_duration * 100));
+                var fill = row.querySelector('.qi-progress-fill');
+                if (fill) { fill.style.width = pct + '%'; } else {
+                  var bar = document.createElement('div');
+                  bar.className = 'qi-progress';
+                  bar.innerHTML = '<div class="qi-progress-fill" style="width:' + pct + '%"></div>';
+                  row.appendChild(bar);
+                }
+              }
+            }
           } catch(e) { console.error('Podcast poll failed', e); }
         }
 
