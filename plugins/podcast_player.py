@@ -663,7 +663,7 @@ class PodcastPlugin(Plugin):
               ? container.children[oldIdx] : null;
             if (oldRow) {
               oldRow.className = 'yt-queue-item';
-              oldRow.querySelector('.yt-qi-indicator').innerHTML = '&#x25CB;';
+              oldRow.querySelector('.yt-qi-indicator').innerHTML = '&#x25B6;';
               var oldTitleEl = oldRow.querySelector('.yt-qi-title');
               if (oldTitleEl && s.queue[oldIdx]) oldTitleEl.innerHTML = pcEsc(s.queue[oldIdx].title || '');
             }
@@ -671,7 +671,7 @@ class PodcastPlugin(Plugin):
               ? container.children[idx] : null;
             if (newRow) {
               newRow.className = 'yt-queue-item' + (s.status === 'playing' ? ' playing' : '') + ' current';
-              newRow.querySelector('.yt-qi-indicator').innerHTML = s.status === 'playing' ? '&#x25B6;' : '&#x2022;';
+              newRow.querySelector('.yt-qi-indicator').innerHTML = '&#x25B6;';
               var titleEl = newRow.querySelector('.yt-qi-title');
               if (titleEl && s.queue[idx]) {
                 var t = s.queue[idx].title || '', e2 = pcEsc(t);
@@ -696,7 +696,7 @@ class PodcastPlugin(Plugin):
             const isCurrent = i === idx;
             const playing = isCurrent && s.status === 'playing';
             const cls = 'yt-queue-item' + (playing ? ' playing' : '') + (isCurrent ? ' current' : '');
-            const indicator = playing ? '&#x25B6;' : (isCurrent ? '&#x2022;' : '&#x25CB;');
+            const indicator = '&#x25B6;';
             let dur = '';
             if (v.duration) {
               const m = Math.floor(v.duration / 60);
