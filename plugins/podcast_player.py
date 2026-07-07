@@ -816,16 +816,17 @@ class PodcastPlugin(Plugin):
           if (row.classList.contains('current')) return;
 
           var isSelected = row.classList.toggle('selected');
-          var container = row.parentNode;
-          var prev = container.querySelector('.yt-queue-item.selected');
-          while (prev && prev !== row) {
-            prev.classList.remove('selected');
-            var pi = Array.prototype.indexOf.call(container.children, prev);
-            if (pi >= 0 && pcState.queue && pcState.queue[pi]) {
-              var pt = prev.querySelector('.yt-qi-title');
-              if (pt) pt.innerHTML = pcEsc(pcState.queue[pi].title || '');
+          if (isSelected) {
+            for (var i = 0; i < row.parentNode.children.length; i++) {
+              var child = row.parentNode.children[i];
+              if (child !== row && child.classList.contains('selected')) {
+                child.classList.remove('selected');
+                if (pcState.queue && pcState.queue[i]) {
+                  var pt = child.querySelector('.yt-qi-title');
+                  if (pt) pt.innerHTML = pcEsc(pcState.queue[i].title || '');
+                }
+              }
             }
-            prev = container.querySelector('.yt-queue-item.selected');
           }
 
           var titleEl = row.querySelector('.yt-qi-title');
