@@ -1,7 +1,7 @@
 import threading
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -107,20 +107,22 @@ def _fetch_feed(feed_name: str, feed_url: str) -> list[dict]:
         if not mp3_url:
             continue
         pub_raw = item.findtext("pubDate", "")
-        try:
-            dt = parsedate_to_datetime(pub_raw)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-        except Exception:
-            dt = datetime.now(timezone.utc)
+        pub_ts = int(time.time())
+        if pub_raw:
+            try:
+                dt = parsedate_to_datetime(pub_raw)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                pub_ts = int(dt.timestamp())
+            except Exception:
+                pass
         dur_raw = item.findtext("duration", "") or item.findtext("itunes:duration", "", ITUNES_NS)
         dur = _parse_duration(dur_raw) if dur_raw else 0
         link = item.findtext("link", "")
         result.append({
             "title": title,
             "url": mp3_url,
-            "published": dt,
-            "published_str": dt.strftime("%m/%d"),
+            "published": pub_ts,
             "duration": dur,
             "feed_name": feed_name,
             "feed_url": feed_url,
@@ -342,8 +344,6 @@ class PodcastPlugin(Plugin):
                     current = dict(queue[curr_idx])
                 src_queue = self.queue if self.status == "playing" else queue
                 queue_out = [dict(v) for v in src_queue]
-                for item in queue_out:
-                    item["published"] = str(item["published"])
                 elapsed = time.time() - self._play_start if self.status == "playing" and self._play_start > 0 else 0
                 return {
                     "status": self.status,
@@ -646,6 +646,10 @@ class PodcastPlugin(Plugin):
           }
         }
 
+        function pcFormatDate(ts) {
+          var d = new Date(ts * 1000);
+          return (d.getMonth()+1).toString().padStart(2,'0') + '/' + d.getDate().toString().padStart(2,'0');
+        }
         function pcEsc(s) { return (''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
         var pcQueueFingerprint = '';
         var pcPrevIndex = -1;
@@ -718,7 +722,7 @@ class PodcastPlugin(Plugin):
               : escaped2;
             html += '<div class="' + cls + '">' +
               '<span class="yt-qi-indicator">' + indicator + '</span>' +
-              '<span class="yt-qi-date">' + (v.published_str || '') + '</span>' +
+              '<span class="yt-qi-date">' + (v.published ? pcFormatDate(v.published) : '') + '</span>' +
               '<span class="yt-qi-handle">' + pcEsc(v.feed_name || '').substring(0, 14) + '</span>' +
               '<span class="yt-qi-title">' + titleHtml + '</span>' +
               '<span class="yt-qi-dur">' + dur + '</span>' +
