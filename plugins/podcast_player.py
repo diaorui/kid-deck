@@ -651,6 +651,12 @@ class PodcastPlugin(Plugin):
           return (d.getMonth()+1).toString().padStart(2,'0') + '/' + d.getDate().toString().padStart(2,'0');
         }
         function pcEsc(s) { return (''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+        function pcApplyScroll(row, text) {
+          var el = row.querySelector('.yt-qi-title');
+          if (!el || el.scrollWidth <= el.clientWidth) return;
+          var e2 = pcEsc(text);
+          el.innerHTML = '<span class="scroll-wrap" style="--dur:' + Math.max(6, text.length / 6) + 's"><span>' + e2 + '&nbsp;&nbsp;&nbsp;</span><span aria-hidden="true">' + e2 + '&nbsp;&nbsp;&nbsp;</span></span>';
+        }
         var pcQueueFingerprint = '';
         var pcPrevIndex = -1;
         function pcRenderQueue(s) {
@@ -687,8 +693,7 @@ class PodcastPlugin(Plugin):
               newRow.querySelector('.yt-qi-indicator').innerHTML = '&#x25B6;';
               var titleEl = newRow.querySelector('.yt-qi-title');
               if (titleEl && s.queue[idx]) {
-                var t = s.queue[idx].title || '', e2 = pcEsc(t);
-                titleEl.innerHTML = '<span class="scroll-wrap" style="--dur:' + Math.max(6, t.length / 6) + 's"><span>' + e2 + '&nbsp;&nbsp;&nbsp;</span><span aria-hidden="true">' + e2 + '&nbsp;&nbsp;&nbsp;</span></span>';
+                titleEl.textContent = s.queue[idx].title || '';
               }
               var durEl = newRow.querySelector('.yt-qi-dur');
               if (durEl && !durEl.textContent && s.queue[idx] && s.queue[idx].duration) {
@@ -696,6 +701,7 @@ class PodcastPlugin(Plugin):
                 var sec = s.queue[idx].duration % 60;
                 durEl.textContent = min + ':' + (sec < 10 ? '0' : '') + sec;
               }
+              pcApplyScroll(newRow, s.queue[idx].title || '');
             }
             return;
           }
@@ -717,9 +723,7 @@ class PodcastPlugin(Plugin):
               dur = m + ':' + (sec < 10 ? '0' : '') + sec;
             }
             var title = v.title || '', escaped2 = pcEsc(title);
-            var titleHtml = isCurrent
-              ? '<span class="scroll-wrap" style="--dur:' + Math.max(6, title.length / 6) + 's"><span>' + escaped2 + '&nbsp;&nbsp;&nbsp;</span><span aria-hidden="true">' + escaped2 + '&nbsp;&nbsp;&nbsp;</span></span>'
-              : escaped2;
+            var titleHtml = escaped2;
             html += '<div class="' + cls + '">' +
               '<span class="yt-qi-indicator">' + indicator + '</span>' +
               '<span class="yt-qi-date">' + (v.published ? pcFormatDate(v.published) : '') + '</span>' +
@@ -731,7 +735,10 @@ class PodcastPlugin(Plugin):
           container.innerHTML = html;
           if (idx >= 0 && idx < s.queue.length) {
             var el = container.children[idx];
-            if (el) el.scrollIntoView({ block: 'nearest' });
+            if (el) {
+              el.scrollIntoView({ block: 'nearest' });
+              pcApplyScroll(el, s.queue[idx].title || '');
+            }
           }
         }
 
@@ -823,7 +830,7 @@ class PodcastPlugin(Plugin):
                 child.classList.remove('selected');
                 if (pcState.queue && pcState.queue[i]) {
                   var pt = child.querySelector('.yt-qi-title');
-                  if (pt) pt.innerHTML = pcEsc(pcState.queue[i].title || '');
+                  if (pt) pt.textContent = pcState.queue[i].title || '';
                 }
               }
             }
@@ -831,9 +838,10 @@ class PodcastPlugin(Plugin):
 
           var titleEl = row.querySelector('.yt-qi-title');
           if (!titleEl || idx < 0 || !pcState.queue || !pcState.queue[idx]) return;
-          var t = pcState.queue[idx].title || '', e2 = pcEsc(t);
-          titleEl.innerHTML = isSelected
-            ? '<span class="scroll-wrap" style="--dur:' + Math.max(6, t.length / 6) + 's"><span>' + e2 + '&nbsp;&nbsp;&nbsp;</span><span aria-hidden="true">' + e2 + '&nbsp;&nbsp;&nbsp;</span></span>'
-            : e2;
+          if (isSelected) {
+            pcApplyScroll(row, pcState.queue[idx].title || '');
+          } else {
+            titleEl.textContent = pcState.queue[idx].title || '';
+          }
         });
         """
