@@ -90,6 +90,7 @@
   }
   .yt-queue-item.playing .yt-qi-title,
   .yt-queue-item.current .yt-qi-title,
+  .yt-queue-item.selected .yt-qi-title,
   .track-item.current .track-title {
     text-overflow: clip;
     mask-image: linear-gradient(90deg, transparent 0, #000 8%, #000 92%, transparent 100%);
@@ -97,6 +98,7 @@
   }
   .yt-queue-item.playing .yt-qi-title .scroll-wrap,
   .yt-queue-item.current .yt-qi-title .scroll-wrap,
+  .yt-queue-item.selected .yt-qi-title .scroll-wrap,
   .track-item.current .track-title .scroll-wrap {
     display: inline-flex;
     animation: marquee var(--dur, 8s) linear infinite;
@@ -184,6 +186,7 @@
     background: var(--accent); color: #fff; font-weight: 500;
   }
   .yt-queue-item.current:not(.playing) { background: var(--card); }
+  .yt-queue-item.selected { background: var(--card-hover); }
   .yt-qi-indicator { width: 16px; text-align: center; flex-shrink: 0; font-size: 14px; color: var(--accent); }
   .playing-mode .yt-qi-indicator { cursor: pointer; position: relative; z-index: 1; }
   .playing-mode .yt-qi-indicator::before {
