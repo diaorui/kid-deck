@@ -2,7 +2,6 @@ import os
 import re
 import threading
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pychromecast
@@ -61,12 +60,12 @@ def _fetch_channel_videos(handle: str, ydl: yt_dlp.YoutubeDL) -> list[dict]:
         vid = entry.get("id")
         dur = entry.get("duration", 0)
         ts = entry.get("timestamp")
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc) if ts else datetime.now(timezone.utc)
+        now_ts = time.time()
+        pub_ts = int(ts) if ts and ts <= now_ts else int(now_ts)
         videos.append({
             "title": entry.get("title", ""),
             "video_id": vid,
-            "published": dt,
-            "published_str": dt.strftime("%m/%d"),
+            "published": pub_ts,
             "link": f"https://youtube.com/watch?v={vid}",
             "handle": handle,
             "duration": dur,
@@ -647,6 +646,10 @@ class YTCastPlugin(Plugin):
           }
         }
 
+        function ytFormatDate(ts) {
+          var d = new Date(ts * 1000);
+          return (d.getMonth()+1).toString().padStart(2,'0') + '/' + d.getDate().toString().padStart(2,'0');
+        }
         function ytEsc(s) { return (''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
         var ytQueueFingerprint = '';
         var ytPrevIndex = -1;
@@ -718,7 +721,7 @@ class YTCastPlugin(Plugin):
               : escaped2;
             html += '<div class="' + cls + '">' +
               '<span class="yt-qi-indicator">' + indicator + '</span>' +
-              '<span class="yt-qi-date">' + (v.published_str || '') + '</span>' +
+              '<span class="yt-qi-date">' + (v.published ? ytFormatDate(v.published) : '') + '</span>' +
               '<span class="yt-qi-handle">' + ytEsc(v.handle || '').replace('@', '') + '</span>' +
               '<span class="yt-qi-title">' + titleHtml + '</span>' +
               '<span class="yt-qi-dur">' + dur + '</span>' +
