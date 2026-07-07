@@ -1,4 +1,3 @@
-import json
 import os
 import re
 import threading
@@ -71,6 +70,7 @@ def _fetch_channel_videos(handle: str, ydl: yt_dlp.YoutubeDL) -> list[dict]:
             "link": f"https://youtube.com/watch?v={vid}",
             "handle": handle,
             "duration": dur,
+            "resolved_url": entry.get("url"),
         })
     return videos
 
@@ -105,31 +105,14 @@ class YTCastPlugin(Plugin):
         self._feed_cache: dict[str, list[dict]] = {}
         self._feed_thread: threading.Thread | None = None
         self._feed_stop_event = threading.Event()
-        self._url_cache: dict[str, str] = {}
-        self._duration_cache: dict[str, int] = {}
         self._ydl = yt_dlp.YoutubeDL({
             'format': '18',
             'quiet': True,
             'playlistend': 5,
+            'socket_timeout': 30,
             'remote_components': ['ejs:github'],
             'extractor_args': {'youtube': ['player_client=web']},
         })
-
-    def _resolve_url(self, video_id: str) -> tuple[str | None, int]:
-        if video_id in self._url_cache:
-            return self._url_cache[video_id], self._duration_cache.get(video_id) or 0
-        try:
-            info = self._ydl.extract_info(f'https://youtube.com/watch?v={video_id}', download=False)
-            url = info.get('url')
-            duration = int(info.get('duration') or 0)
-            if url:
-                self._url_cache[video_id] = url
-            if duration:
-                self._duration_cache[video_id] = duration
-            return url, duration
-        except Exception as e:
-            print(f"YT Cast: failed to resolve {video_id}: {e}", flush=True)
-            return None, 0
 
     def _build_preview(self) -> list[dict]:
         items = []
@@ -152,8 +135,6 @@ class YTCastPlugin(Plugin):
                     videos = _fetch_channel_videos(handle, self._ydl)
                     with self._lock:
                         self._feed_cache[handle] = videos
-                        for v in videos:
-                            self._duration_cache[v["video_id"]] = v["duration"]
                 except Exception as e:
                     print(f"YT Cast feed: failed to fetch {handle}: {e}", flush=True)
                 delay = 0.5 if first_pass else self.feed_interval
@@ -186,14 +167,15 @@ class YTCastPlugin(Plugin):
                 video = self.queue[self.current_index]
                 video_id = video["video_id"]
                 title = video["title"]
+                url = video.get("resolved_url")
+                dur = video.get("duration", 0) or 0
             try:
-                url, dur = self._resolve_url(video_id)
-                if url is None:
+                if not url:
+                    info = self._ydl.extract_info(f'https://youtube.com/watch?v={video_id}', download=False)
+                    url = info.get('url')
+                    dur = int(info.get('duration') or 0)
+                if not url:
                     raise RuntimeError(f"could not resolve URL for {video_id}")
-                if dur:
-                    with self._lock:
-                        if self.current_index < len(self.queue):
-                            self.queue[self.current_index]['duration'] = dur
                 mc = self._cast.media_controller
                 mc.play_media(url, 'video/mp4')
                 self._play_start = time.time()
@@ -338,20 +320,11 @@ class YTCastPlugin(Plugin):
                     curr_idx = -1
                 if curr_idx >= 0 and curr_idx < len(queue):
                     current = dict(queue[curr_idx])
-                    vid = current["video_id"]
-                    if current.get("duration") is None and vid in self._duration_cache:
-                        current["duration"] = self._duration_cache[vid]
                 if self.status == "playing" and self.cast_start_time > 0 and self.uncast_duration > 0:
                     elapsed = time.time() - self.cast_start_time
                     remaining = max(0, int(self.uncast_duration - elapsed / 60))
                 src_queue = self.queue if self.status == "playing" else queue
-                queue_out = []
-                for v in src_queue:
-                    item = dict(v)
-                    vid = v["video_id"]
-                    if item.get("duration") is None and vid in self._duration_cache:
-                        item["duration"] = self._duration_cache[vid]
-                    queue_out.append(item)
+                queue_out = [dict(v) for v in src_queue]
                 elapsed = time.time() - self._play_start if self.status == "playing" and self._play_start > 0 else 0
                 return {
                     "status": self.status,
@@ -400,8 +373,6 @@ class YTCastPlugin(Plugin):
                         videos = _fetch_channel_videos(handle, self._ydl)
                         with self._lock:
                             self._feed_cache[handle] = videos
-                            for v in videos:
-                                self._duration_cache[v["video_id"]] = v["duration"]
                     except Exception as e:
                         print(f"YT Cast: refresh failed for {handle}: {e}", flush=True)
 
