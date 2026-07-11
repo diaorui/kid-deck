@@ -166,13 +166,12 @@ class YTCastPlugin(Plugin):
                 video = self.queue[self.current_index]
                 video_id = video["video_id"]
                 title = video["title"]
-                url = video.get("resolved_url")
                 dur = video.get("duration", 0) or 0
             try:
-                if not url:
-                    info = self._ydl.extract_info(f'https://youtube.com/watch?v={video_id}', download=False)
-                    url = info.get('url')
-                    dur = int(info.get('duration') or 0)
+                # Re-resolve at play time to avoid stale URLs from feed fetching
+                info = self._ydl.extract_info(f'https://youtube.com/watch?v={video_id}', download=False)
+                url = info.get('url') or video.get("resolved_url")
+                dur = int(info.get('duration') or dur)
                 if not url:
                     raise RuntimeError(f"could not resolve URL for {video_id}")
                 mc = self._cast.media_controller
