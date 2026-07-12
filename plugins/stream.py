@@ -373,6 +373,11 @@ class StreamPlugin(Plugin):
         except Exception as e:
             print(f"Stream: failed to save config: {e}", flush=True)
 
+    def _build_preview_playlist(self) -> list[dict]:
+        """Live preview from latest cache (as if starting a fresh session). Does not mutate play state."""
+        v_pool, a_pool = self._build_pools(exclude_ids=set())
+        return plan_playlist(v_pool, a_pool, 0.0, 0.0, self._ratio())
+
     def _build_pools(self, exclude_ids: set[str] | None = None) -> tuple[list[dict], list[dict]]:
         exclude_ids = exclude_ids or set()
         max_v = self.max_video_minutes * 60
@@ -757,8 +762,13 @@ class StreamPlugin(Plugin):
         @self.router.get("/status")
         async def status():
             with self._lock:
-                curr_idx = self.current_index
-                playlist = [dict(x) for x in self.playlist]
+                if self.status == "playing":
+                    playlist = [dict(x) for x in self.playlist]
+                    curr_idx = self.current_index
+                else:
+                    # Live preview from latest feed cache (like TV/Podcast tabs)
+                    playlist = [dict(x) for x in self._build_preview_playlist()]
+                    curr_idx = -1
                 current = None
                 if 0 <= curr_idx < len(playlist):
                     current = dict(playlist[curr_idx])
