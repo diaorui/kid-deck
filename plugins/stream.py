@@ -1301,17 +1301,17 @@ class StreamPlugin(Plugin):
               }
             }
           }
-          // progress bar on current row
+          // progress bar on current row (same classes as TV/Podcast)
           var rows = container.children;
           for (var ri = 0; ri < rows.length; ri++) {
-            var oldBars = rows[ri].querySelectorAll('.yt-qi-progress');
+            var oldBars = rows[ri].querySelectorAll('.qi-progress');
             oldBars.forEach(function(el){ el.remove(); });
           }
           if (s.status === 'playing' && s.media_duration > 0 && idx >= 0 && rows[idx]) {
             var pct = Math.min(100, Math.max(0, (s.media_position || 0) / s.media_duration * 100));
             var bar = document.createElement('div');
-            bar.className = 'yt-qi-progress';
-            bar.innerHTML = '<div class="yt-qi-progress-fill" style="width:' + pct + '%"></div>';
+            bar.className = 'qi-progress';
+            bar.innerHTML = '<div class="qi-progress-fill" style="width:' + pct + '%"></div>';
             rows[idx].appendChild(bar);
           }
           var totalSec = 0;
