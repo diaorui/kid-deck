@@ -298,10 +298,12 @@ class StreamPlugin(Plugin):
         self._thread: threading.Thread | None = None
         self._yt_cache: dict[str, list[dict]] = {}
         self._pc_cache: dict[str, list[dict]] = {}
-        self._feed_thread: threading.Thread | None = None
+        self._yt_feed_thread: threading.Thread | None = None
+        self._pc_feed_thread: threading.Thread | None = None
         self._feed_stop_event = threading.Event()
         self._play_start: float = 0.0
         self._media_duration_local: int = 0
+        # Separate ydl instances so YT feed thread and play resolve never share one
         self._ydl = yt_dlp.YoutubeDL(
             {
                 "format": "18",
@@ -507,12 +509,12 @@ class StreamPlugin(Plugin):
         # Mono-type remaining and cache cannot fill the other kind — play what we have
         return bool(rest)
 
-    def _feed_fetch_loop(self):
+    def _yt_feed_loop(self):
+        """Background YT channel fetch — independent of podcast loop."""
         first_pass = True
         while not self._feed_stop_event.is_set():
             with self._lock:
                 handles = list(self.channel_enabled.keys())
-                feed_list = list(self.feeds.items())
             for handle in handles:
                 if self._feed_stop_event.is_set():
                     return
@@ -524,6 +526,14 @@ class StreamPlugin(Plugin):
                     print(f"Stream YT feed: failed {handle}: {e}", flush=True)
                 delay = 0.5 if first_pass else self.feed_interval
                 self._feed_stop_event.wait(delay)
+            first_pass = False
+
+    def _pc_feed_loop(self):
+        """Background podcast RSS fetch — independent of YT loop."""
+        first_pass = True
+        while not self._feed_stop_event.is_set():
+            with self._lock:
+                feed_list = list(self.feeds.items())
             for feed_name, info in feed_list:
                 if self._feed_stop_event.is_set():
                     return
@@ -741,17 +751,21 @@ class StreamPlugin(Plugin):
     def start(self):
         super().start()
         self._feed_stop_event.clear()
-        self._feed_thread = threading.Thread(target=self._feed_fetch_loop, daemon=True)
-        self._feed_thread.start()
-        print("Stream: ready")
+        self._yt_feed_thread = threading.Thread(target=self._yt_feed_loop, daemon=True)
+        self._pc_feed_thread = threading.Thread(target=self._pc_feed_loop, daemon=True)
+        self._yt_feed_thread.start()
+        self._pc_feed_thread.start()
+        print("Stream: ready (YT + podcast fetch in parallel)")
 
     def stop(self):
         self._stop_event.set()
         self._feed_stop_event.set()
         if self._thread:
             self._thread.join(timeout=5)
-        if self._feed_thread:
-            self._feed_thread.join(timeout=5)
+        if self._yt_feed_thread:
+            self._yt_feed_thread.join(timeout=5)
+        if self._pc_feed_thread:
+            self._pc_feed_thread.join(timeout=5)
         self._do_stop()
         super().stop()
         print("Stream: stopped")
