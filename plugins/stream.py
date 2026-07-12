@@ -922,6 +922,34 @@ class StreamPlugin(Plugin):
                             self._do_stop()
             return {"ok": True, "stop_time": self.stop_time.strftime("%H:%M")}
 
+        @self.router.post("/settings")
+        async def settings_route(request: Request):
+            data = await request.json()
+            with self._lock:
+                if "screen_minutes_per_hour" in data:
+                    v = float(data["screen_minutes_per_hour"])
+                    self.screen_minutes_per_hour = max(1.0, min(60.0, v))
+                if "max_video_minutes" in data:
+                    v = int(data["max_video_minutes"])
+                    self.max_video_minutes = max(1, min(180, v))
+                if "max_audio_minutes" in data:
+                    v = int(data["max_audio_minutes"])
+                    self.max_audio_minutes = max(1, min(180, v))
+                if "playlist_horizon_hours" in data:
+                    v = float(data["playlist_horizon_hours"])
+                    self.playlist_horizon_hours = max(0.5, min(24.0, v))
+            self._save_config()
+            with self._lock:
+                return {
+                    "ok": True,
+                    "params": {
+                        "screen_minutes_per_hour": self.screen_minutes_per_hour,
+                        "max_video_minutes": self.max_video_minutes,
+                        "max_audio_minutes": self.max_audio_minutes,
+                        "playlist_horizon_hours": self.playlist_horizon_hours,
+                    },
+                }
+
         @self.router.post("/toggle_channel")
         async def toggle_channel(request: Request):
             data = await request.json()
@@ -1008,6 +1036,36 @@ class StreamPlugin(Plugin):
             <span class="auto-stop-value" id="st-stop-time-display" onclick="stEditStopTime()">--:--</span>
             <input type="time" id="st-stop-time-input" style="display:none" onchange="stSaveStopTime()">
           </div>
+
+          <details class="collapsible" id="st-settings-section">
+            <summary>Settings</summary>
+            <div style="display:flex;flex-direction:column;gap:10px;padding:4px 0 8px">
+              <div class="auto-stop-row" style="margin:0">
+                <span class="auto-stop-label">Screen min/hour</span>
+                <input type="number" id="st-param-screen" min="1" max="60" step="1"
+                  style="width:72px;background:var(--card-hover);border:1px solid #333;border-radius:8px;color:var(--accent);font-size:18px;font-weight:500;padding:6px 8px;text-align:right"
+                  onchange="stSaveSettings()">
+              </div>
+              <div class="auto-stop-row" style="margin:0">
+                <span class="auto-stop-label">Max video (min)</span>
+                <input type="number" id="st-param-max-video" min="1" max="180" step="1"
+                  style="width:72px;background:var(--card-hover);border:1px solid #333;border-radius:8px;color:var(--accent);font-size:18px;font-weight:500;padding:6px 8px;text-align:right"
+                  onchange="stSaveSettings()">
+              </div>
+              <div class="auto-stop-row" style="margin:0">
+                <span class="auto-stop-label">Max audio (min)</span>
+                <input type="number" id="st-param-max-audio" min="1" max="180" step="1"
+                  style="width:72px;background:var(--card-hover);border:1px solid #333;border-radius:8px;color:var(--accent);font-size:18px;font-weight:500;padding:6px 8px;text-align:right"
+                  onchange="stSaveSettings()">
+              </div>
+              <div class="auto-stop-row" style="margin:0">
+                <span class="auto-stop-label">Horizon (hours)</span>
+                <input type="number" id="st-param-horizon" min="0.5" max="24" step="0.5"
+                  style="width:72px;background:var(--card-hover);border:1px solid #333;border-radius:8px;color:var(--accent);font-size:18px;font-weight:500;padding:6px 8px;text-align:right"
+                  onchange="stSaveSettings()">
+              </div>
+            </div>
+          </details>
 
           <details class="collapsible" id="st-channels-section">
             <summary>Channels</summary>
@@ -1117,6 +1175,43 @@ class StreamPlugin(Plugin):
           if (val) {
             document.getElementById('st-stop-time-display').textContent = val;
             await stFetch('/api/stream/stop_time', { time: val });
+          }
+        }
+        var stParamsFp = '';
+        function stFillParams(p) {
+          if (!p) return;
+          var fp = [p.screen_minutes_per_hour, p.max_video_minutes, p.max_audio_minutes, p.playlist_horizon_hours].join('|');
+          if (fp === stParamsFp) return;
+          // Don't overwrite while user is editing an input
+          var ae = document.activeElement;
+          if (ae && ae.id && ae.id.indexOf('st-param-') === 0) return;
+          stParamsFp = fp;
+          document.getElementById('st-param-screen').value = p.screen_minutes_per_hour;
+          document.getElementById('st-param-max-video').value = p.max_video_minutes;
+          document.getElementById('st-param-max-audio').value = p.max_audio_minutes;
+          document.getElementById('st-param-horizon').value = p.playlist_horizon_hours;
+        }
+        async function stSaveSettings() {
+          stHideError();
+          var body = {
+            screen_minutes_per_hour: parseFloat(document.getElementById('st-param-screen').value),
+            max_video_minutes: parseInt(document.getElementById('st-param-max-video').value, 10),
+            max_audio_minutes: parseInt(document.getElementById('st-param-max-audio').value, 10),
+            playlist_horizon_hours: parseFloat(document.getElementById('st-param-horizon').value)
+          };
+          if (isNaN(body.screen_minutes_per_hour) || isNaN(body.max_video_minutes) ||
+              isNaN(body.max_audio_minutes) || isNaN(body.playlist_horizon_hours)) {
+            stShowError('Invalid settings');
+            return;
+          }
+          const r = await stFetch('/api/stream/settings', body);
+          if (!r || !r.ok) {
+            stShowError(r ? (r.error || 'Settings failed') : 'Settings failed');
+            return;
+          }
+          if (r.params) {
+            stParamsFp = '';
+            stFillParams(r.params);
           }
         }
         async function stToggleChannel(handle, enabled) {
@@ -1273,6 +1368,7 @@ class StreamPlugin(Plugin):
             document.getElementById('st-play-btn').style.display = s.status === 'playing' ? 'none' : '';
             document.getElementById('st-stop-btn').style.display = s.status === 'playing' ? '' : 'none';
             document.getElementById('st-skip-btn').style.display = s.status === 'playing' ? '' : 'none';
+            stFillParams(s.params);
             stRenderQueue(s);
             stRenderChannels(s);
             stRenderFeeds(s);
