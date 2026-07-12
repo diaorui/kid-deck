@@ -1,0 +1,1266 @@
+import os
+import re
+import threading
+import time
+import xml.etree.ElementTree as ET
+from datetime import datetime, time as dtime, timezone
+from email.utils import parsedate_to_datetime
+from pathlib import Path
+
+import pychromecast
+import requests
+
+deno = os.path.expanduser("~/.deno/bin")
+if deno not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = deno + ":" + os.environ.get("PATH", "")
+
+import yt_dlp
+
+from plugins import Plugin
+
+
+def parse_time(time_str: str) -> dtime:
+    parts = time_str.strip().split(":")
+    return dtime(int(parts[0]), int(parts[1]))
+
+
+CHANNEL_IDS = {
+    "@likenastyaofficial": "UCJplp5SjeGSdVdwsfb9Q7lQ",
+    "@ArtforKidsHub": "UC5XMF3Inoi8R9nSI8ChOsdQ",
+    "@annamcnulty": "UCPIavfNa4DTfHXDBaFOHuKA",
+    "@RosannaPansino": "UCjwmbv6NE4mOh8Z8VhPUx1Q",
+    "@XIAOXINGXING-樂樂TV": "UCtWocEKhgpEffPDlwwozK9Q",
+    "@TrinityandBeyond": "UCCryrohClZM8XK4yEYBE_qA",
+    "@PrestonYT": "UC70Dib4MvFfT1tU6MqeyHpQ",
+    "@KidsDianaShow": "UCk8GzjMOrta8yxDcKfylJYw",
+    "@Blippi": "UC5PYHgAzJ1wLEidB58SK6Xw",
+    "@BeyondFamily": "UCI3t3ddiv350EgU_Q7EOP9w",
+    "@XiaolingToy": "UC1krNaypYa_vx9W2Kvku8Xw",
+}
+
+
+def _resolve_channel_id(handle: str) -> str | None:
+    if handle in CHANNEL_IDS:
+        return CHANNEL_IDS[handle]
+    r = requests.get(
+        f"https://www.youtube.com/{handle}/about",
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=15,
+    )
+    for p in [
+        r'"externalId":"(UC[^"]+)"',
+        r'"channelId":"(UC[^"]+)"',
+        r'<meta itemprop="channelId" content="(UC[^"]+)"',
+    ]:
+        m = re.search(p, r.text)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _fetch_channel_videos(handle: str, ydl: yt_dlp.YoutubeDL) -> list[dict]:
+    url = f"https://www.youtube.com/{handle}/videos"
+    info = ydl.extract_info(url, download=False)
+    entries = info.get("entries", [])
+    videos = []
+    for entry in entries:
+        if not entry or entry.get("media_type") != "video":
+            continue
+        vid = entry.get("id")
+        dur = int(entry.get("duration") or 0)
+        ts = entry.get("timestamp")
+        now_ts = time.time()
+        pub_ts = int(ts) if ts and ts <= now_ts else int(now_ts)
+        videos.append(
+            {
+                "title": entry.get("title", ""),
+                "video_id": vid,
+                "published": pub_ts,
+                "link": f"https://youtube.com/watch?v={vid}",
+                "handle": handle,
+                "duration": dur,
+                "resolved_url": entry.get("url"),
+            }
+        )
+    return videos
+
+
+def _parse_duration(raw: str) -> int:
+    raw = raw.strip()
+    if raw.isdigit():
+        return int(raw)
+    parts = raw.split(":")
+    if len(parts) == 2:
+        return int(parts[0]) * 60 + int(parts[1])
+    if len(parts) == 3:
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+    return 0
+
+
+def _validate_feed(url: str) -> dict:
+    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+    if r.status_code != 200:
+        return {"ok": False, "error": f"HTTP {r.status_code} — server returned error"}
+    try:
+        root = ET.fromstring(r.content)
+    except ET.ParseError as e:
+        return {"ok": False, "error": f"Invalid XML: {e}"}
+    tag = root.tag.lower()
+    if tag == "rss":
+        ch = root.find("channel")
+        if ch is None:
+            return {"ok": False, "error": "RSS has no <channel> element"}
+    elif tag in ("feed",):
+        return {"ok": False, "error": "Atom feeds are not supported (only RSS 2.0)"}
+    else:
+        return {"ok": False, "error": f"Not an RSS feed (root is <{tag}>)"}
+    title = ch.findtext("title", "").strip()
+    if not title:
+        return {"ok": False, "error": "Feed has no title"}
+    items = ch.findall("item")
+    if not items:
+        return {"ok": False, "error": "Feed has no episodes"}
+    sample_url = ""
+    for item in items:
+        enclosure = item.find("enclosure")
+        if enclosure is None:
+            continue
+        eurl = (enclosure.get("url") or "").strip()
+        if eurl:
+            sample_url = eurl
+            break
+    if not sample_url:
+        return {"ok": False, "error": "No audio content found in any episode"}
+    return {"ok": True, "title": title}
+
+
+ITUNES_NS = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
+
+
+def _fetch_feed(feed_name: str, feed_url: str, keep: int) -> list[dict]:
+    r = requests.get(feed_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+    root = ET.fromstring(r.content)
+    ch = root.find("channel")
+    items = ch.findall("item")
+    result = []
+    for item in items:
+        title = item.findtext("title", "Untitled")
+        enclosure = item.find("enclosure")
+        if enclosure is None:
+            continue
+        mp3_url = (enclosure.get("url") or "").strip()
+        if not mp3_url:
+            continue
+        pub_raw = item.findtext("pubDate", "")
+        pub_ts = int(time.time())
+        if pub_raw:
+            try:
+                dt = parsedate_to_datetime(pub_raw)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                pub_ts = int(dt.timestamp())
+            except Exception:
+                pass
+        dur_raw = item.findtext("duration", "") or item.findtext(
+            "itunes:duration", "", ITUNES_NS
+        )
+        dur = _parse_duration(dur_raw) if dur_raw else 0
+        link = item.findtext("link", "")
+        result.append(
+            {
+                "title": title,
+                "url": mp3_url,
+                "published": pub_ts,
+                "duration": dur,
+                "feed_name": feed_name,
+                "feed_url": feed_url,
+                "link": link,
+            }
+        )
+    result.sort(key=lambda e: e["published"], reverse=True)
+    if keep > 0:
+        result = result[:keep]
+    return result
+
+
+def _item_id(item: dict) -> str:
+    return item.get("id") or ""
+
+
+def _normalize_video(v: dict) -> dict:
+    vid = v.get("video_id") or ""
+    return {
+        "id": f"v:{vid}",
+        "kind": "video",
+        "title": v.get("title") or "",
+        "published": int(v.get("published") or 0),
+        "duration": int(v.get("duration") or 0),
+        "source": v.get("handle") or "",
+        "play_url": v.get("resolved_url") or "",
+        "video_id": vid,
+        "link": v.get("link") or f"https://youtube.com/watch?v={vid}",
+    }
+
+
+def _normalize_audio(e: dict) -> dict:
+    url = e.get("url") or ""
+    return {
+        "id": f"a:{url}",
+        "kind": "audio",
+        "title": e.get("title") or "",
+        "published": int(e.get("published") or 0),
+        "duration": int(e.get("duration") or 0),
+        "source": e.get("feed_name") or "",
+        "play_url": url,
+        "link": e.get("link") or "",
+    }
+
+
+def plan_playlist(
+    video_pool: list[dict],
+    audio_pool: list[dict],
+    screen0: float,
+    total0: float,
+    ratio: float,
+) -> list[dict]:
+    """Interleave newest pools by cumulative screen/total ratio."""
+    vi = ai = 0
+    screen = float(screen0)
+    total = float(total0)
+    out: list[dict] = []
+    while vi < len(video_pool) or ai < len(audio_pool):
+        want_video = (total <= 0) or (screen / total < ratio)
+        if want_video and vi < len(video_pool):
+            item = video_pool[vi]
+            vi += 1
+            out.append(item)
+            d = float(item.get("duration") or 0)
+            screen += d
+            total += d
+        elif ai < len(audio_pool):
+            item = audio_pool[ai]
+            ai += 1
+            out.append(item)
+            total += float(item.get("duration") or 0)
+        elif vi < len(video_pool):
+            item = video_pool[vi]
+            vi += 1
+            out.append(item)
+            d = float(item.get("duration") or 0)
+            screen += d
+            total += d
+        else:
+            break
+    return out
+
+
+class StreamPlugin(Plugin):
+    name = "stream"
+    title = "Stream"
+    icon = "📡"
+    order = 4
+
+    def __init__(self, controller, config: dict):
+        super().__init__(controller, config)
+
+        self.screen_minutes_per_hour: float = float(
+            config.get("screen_minutes_per_hour", 12)
+        )
+        self.max_video_minutes: int = int(config.get("max_video_minutes", 30))
+        self.max_audio_minutes: int = int(config.get("max_audio_minutes", 30))
+        self.playlist_horizon_hours: float = float(
+            config.get("playlist_horizon_hours", 3.5)
+        )
+        self.yt_fetch_per_channel: int = int(config.get("yt_fetch_per_channel", 8))
+        self.podcast_keep_per_feed: int = int(config.get("podcast_keep_per_feed", 10))
+        self.feed_interval: int = int(config.get("feed_interval", 60))
+
+        sched = config.get("schedule") or {}
+        self.stop_time = parse_time(sched.get("stop_time", "21:00"))
+
+        self.channel_enabled: dict[str, bool] = dict(
+            config.get("channel_enabled", {})
+        )
+        self.channels: list[str] = list(self.channel_enabled.keys()) or list(
+            config.get("channels", [])
+        )
+        if self.channels and not self.channel_enabled:
+            self.channel_enabled = {h: True for h in self.channels}
+        self.feeds: dict[str, dict] = dict(config.get("feeds", {}))
+
+        self.status = "disconnected"
+        self.device_name = ""
+        self.playlist: list[dict] = []
+        self.current_index = -1
+        self.total_played_sec: float = 0.0
+        self.screen_played_sec: float = 0.0
+        self.played_ids: set[str] = set()
+
+        self._cast: pychromecast.Chromecast | None = None
+        self._browser: pychromecast.discovery.CastBrowser | None = None
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._yt_cache: dict[str, list[dict]] = {}
+        self._pc_cache: dict[str, list[dict]] = {}
+        self._feed_thread: threading.Thread | None = None
+        self._feed_stop_event = threading.Event()
+        self._play_start: float = 0.0
+        self._media_duration_local: int = 0
+        self._ydl = yt_dlp.YoutubeDL(
+            {
+                "format": "18",
+                "quiet": True,
+                "playlistend": self.yt_fetch_per_channel,
+                "socket_timeout": 30,
+                "remote_components": ["ejs:github"],
+                "extractor_args": {"youtube": ["player_client=web"]},
+            }
+        )
+        self._ydl_play = yt_dlp.YoutubeDL(
+            {
+                "format": "18",
+                "quiet": True,
+                "socket_timeout": 30,
+                "remote_components": ["ejs:github"],
+                "extractor_args": {"youtube": ["player_client=web"]},
+            }
+        )
+
+    def _ratio(self) -> float:
+        return max(0.01, min(0.99, self.screen_minutes_per_hour / 60.0))
+
+    def _video_budget_sec(self) -> float:
+        return self.playlist_horizon_hours * self.screen_minutes_per_hour * 60.0
+
+    def _audio_budget_sec(self) -> float:
+        audio_min = max(0.0, 60.0 - self.screen_minutes_per_hour)
+        return self.playlist_horizon_hours * audio_min * 60.0
+
+    def _past_stop_time(self) -> bool:
+        now = datetime.now().time()
+        if self.stop_time.hour < 6:
+            if now.hour < 6:
+                return now >= self.stop_time
+            return True
+        if now.hour < 6:
+            return False
+        return now >= self.stop_time
+
+    def _save_config(self):
+        path = Path(__file__).resolve().parent.parent / "config.yaml"
+        try:
+            import yaml
+
+            with open(path) as f:
+                cfg = yaml.safe_load(f) or {}
+            if "plugins" not in cfg:
+                cfg["plugins"] = {}
+            cfg["plugins"]["stream"] = {
+                "screen_minutes_per_hour": self.screen_minutes_per_hour,
+                "max_video_minutes": self.max_video_minutes,
+                "max_audio_minutes": self.max_audio_minutes,
+                "playlist_horizon_hours": self.playlist_horizon_hours,
+                "yt_fetch_per_channel": self.yt_fetch_per_channel,
+                "podcast_keep_per_feed": self.podcast_keep_per_feed,
+                "feed_interval": self.feed_interval,
+                "schedule": {
+                    "stop_time": self.stop_time.strftime("%H:%M"),
+                },
+                "channel_enabled": dict(self.channel_enabled),
+                "channels": list(self.channels),
+                "feeds": {
+                    name: {"url": info["url"], "enabled": info.get("enabled", True)}
+                    for name, info in self.feeds.items()
+                },
+            }
+            with open(path, "w") as f:
+                yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+        except Exception as e:
+            print(f"Stream: failed to save config: {e}", flush=True)
+
+    def _build_pools(self, exclude_ids: set[str] | None = None) -> tuple[list[dict], list[dict]]:
+        exclude_ids = exclude_ids or set()
+        max_v = self.max_video_minutes * 60
+        max_a = self.max_audio_minutes * 60
+        v_budget = self._video_budget_sec()
+        a_budget = self._audio_budget_sec()
+
+        videos: list[dict] = []
+        for handle in self.channels:
+            if not self.channel_enabled.get(handle, True):
+                continue
+            for raw in self._yt_cache.get(handle, []):
+                item = _normalize_video(raw)
+                if not item["video_id"]:
+                    continue
+                if item["duration"] <= 0 or item["duration"] > max_v:
+                    continue
+                if item["id"] in exclude_ids:
+                    continue
+                videos.append(item)
+        videos.sort(key=lambda x: x["published"], reverse=True)
+        # stable unique by id
+        seen: set[str] = set()
+        uniq_v: list[dict] = []
+        for it in videos:
+            if it["id"] in seen:
+                continue
+            seen.add(it["id"])
+            uniq_v.append(it)
+
+        audios: list[dict] = []
+        for name, info in self.feeds.items():
+            if not info.get("enabled", True):
+                continue
+            for raw in self._pc_cache.get(name, []):
+                item = _normalize_audio(raw)
+                if not item["play_url"]:
+                    continue
+                if item["duration"] <= 0 or item["duration"] > max_a:
+                    continue
+                if item["id"] in exclude_ids:
+                    continue
+                audios.append(item)
+        audios.sort(key=lambda x: x["published"], reverse=True)
+        seen_a: set[str] = set()
+        uniq_a: list[dict] = []
+        for it in audios:
+            if it["id"] in seen_a:
+                continue
+            seen_a.add(it["id"])
+            uniq_a.append(it)
+
+        video_pool: list[dict] = []
+        acc = 0.0
+        for it in uniq_v:
+            video_pool.append(it)
+            acc += it["duration"]
+            if acc >= v_budget:
+                break
+
+        audio_pool: list[dict] = []
+        acc = 0.0
+        for it in uniq_a:
+            audio_pool.append(it)
+            acc += it["duration"]
+            if acc >= a_budget:
+                break
+
+        return video_pool, audio_pool
+
+    def _replan_locked(self, allow_replay: bool = False) -> bool:
+        """Rebuild playlist from latest cache. Caller holds lock.
+        Returns True if playlist non-empty after replan.
+        """
+        exclude = set() if allow_replay else set(self.played_ids)
+        v_pool, a_pool = self._build_pools(exclude_ids=exclude)
+        if not v_pool and not a_pool and not allow_replay and self.played_ids:
+            # loop: allow replaying already-played items
+            self.played_ids.clear()
+            v_pool, a_pool = self._build_pools(exclude_ids=set())
+
+        planned = plan_playlist(
+            v_pool,
+            a_pool,
+            self.screen_played_sec,
+            self.total_played_sec,
+            self._ratio(),
+        )
+        self.playlist = planned
+        self.current_index = 0 if planned else -1
+        print(
+            f"Stream: replan → {len(planned)} items "
+            f"(Vpool={len(v_pool)} Apool={len(a_pool)} "
+            f"screen={self.screen_played_sec/60:.1f}m total={self.total_played_sec/60:.1f}m)",
+            flush=True,
+        )
+        return bool(planned)
+
+    def _ensure_mixed_playlist_locked(self) -> bool:
+        """Ensure we have something to play; replan from latest cache when a kind runs out.
+
+        If remaining playlist is empty, or remaining is missing video/audio while the
+        latest cache can still supply that kind, rebuild so we do not stream only one type.
+        """
+        if self.current_index < 0 or self.current_index >= len(self.playlist):
+            return self._replan_locked(allow_replay=False) or self._replan_locked(
+                allow_replay=True
+            )
+
+        rest = self.playlist[self.current_index :]
+        has_v = any(x.get("kind") == "video" for x in rest)
+        has_a = any(x.get("kind") == "audio" for x in rest)
+        if has_v and has_a:
+            return True
+
+        # Latest cache (excluding played): can we supply the missing kind?
+        v_pool, a_pool = self._build_pools(exclude_ids=self.played_ids)
+        need_replan = (not has_v and len(v_pool) > 0) or (not has_a and len(a_pool) > 0)
+        if not need_replan and (v_pool or a_pool) and not rest:
+            need_replan = True
+        if need_replan:
+            ok = self._replan_locked(allow_replay=False)
+            if not ok:
+                ok = self._replan_locked(allow_replay=True)
+            return ok
+
+        # Mono-type remaining and cache cannot fill the other kind — play what we have
+        return bool(rest)
+
+    def _feed_fetch_loop(self):
+        first_pass = True
+        while not self._feed_stop_event.is_set():
+            with self._lock:
+                handles = list(self.channels)
+                feed_list = list(self.feeds.items())
+            for handle in handles:
+                if self._feed_stop_event.is_set():
+                    return
+                try:
+                    videos = _fetch_channel_videos(handle, self._ydl)
+                    with self._lock:
+                        self._yt_cache[handle] = videos
+                except Exception as e:
+                    print(f"Stream YT feed: failed {handle}: {e}", flush=True)
+                delay = 0.5 if first_pass else self.feed_interval
+                self._feed_stop_event.wait(delay)
+            for feed_name, info in feed_list:
+                if self._feed_stop_event.is_set():
+                    return
+                if not info.get("enabled", True):
+                    continue
+                try:
+                    episodes = _fetch_feed(
+                        feed_name, info["url"], self.podcast_keep_per_feed
+                    )
+                    with self._lock:
+                        self._pc_cache[feed_name] = episodes
+                except Exception as e:
+                    print(f"Stream podcast feed: failed {feed_name}: {e}", flush=True)
+                delay = 0.5 if first_pass else self.feed_interval
+                self._feed_stop_event.wait(delay)
+            first_pass = False
+
+    def _discover(self) -> pychromecast.Chromecast | None:
+        try:
+            chromecasts, browser = pychromecast.get_chromecasts()
+        except Exception as e:
+            print(f"Stream: discovery error: {e}", flush=True)
+            return None
+        self._browser = browser
+        if chromecasts:
+            cc = chromecasts[0]
+            try:
+                cc.wait(timeout=10)
+            except Exception as e:
+                print(f"Stream: device wait error: {e}", flush=True)
+            return cc
+        return None
+
+    def _record_progress_locked(self, item: dict | None):
+        if not item or self._play_start <= 0:
+            return
+        elapsed = max(0.0, time.time() - self._play_start)
+        dur = float(item.get("duration") or 0)
+        played = min(elapsed, dur) if dur > 0 else elapsed
+        self.total_played_sec += played
+        if item.get("kind") == "video":
+            self.screen_played_sec += played
+        iid = _item_id(item)
+        if iid:
+            self.played_ids.add(iid)
+        self._play_start = 0
+
+    def _play_current(self) -> str | None:
+        """Play playlist[current_index]. May replan if needed. Returns error or None."""
+        max_attempts = 12
+        for _ in range(max_attempts):
+            if self._past_stop_time():
+                self._do_stop()
+                return "past stop time"
+            with self._lock:
+                if not self._ensure_mixed_playlist_locked():
+                    self.status = "connected_idle"
+                    return "playlist empty"
+                if self.current_index < 0 or self.current_index >= len(self.playlist):
+                    self.status = "connected_idle"
+                    return "playlist empty"
+                item = dict(self.playlist[self.current_index])
+                cast = self._cast
+            if cast is None:
+                return "not connected"
+            try:
+                if item.get("kind") == "video":
+                    video_id = item.get("video_id") or ""
+                    # Re-resolve at play time to avoid stale feed-fetched URLs
+                    info = self._ydl_play.extract_info(
+                        f"https://youtube.com/watch?v={video_id}", download=False
+                    )
+                    url = info.get("url") or item.get("play_url")
+                    dur = int(info.get("duration") or item.get("duration") or 0)
+                    if not url:
+                        raise RuntimeError(f"could not resolve URL for {video_id}")
+                    mc = cast.media_controller
+                    mc.play_media(url, "video/mp4")
+                    with self._lock:
+                        if self.current_index < len(self.playlist):
+                            self.playlist[self.current_index]["duration"] = dur
+                            self.playlist[self.current_index]["play_url"] = url
+                        self._play_start = time.time()
+                        self._media_duration_local = dur
+                        self.status = "playing"
+                    print(
+                        f"Stream: playing video [{self.current_index + 1}/{len(self.playlist)}] {item.get('title')}",
+                        flush=True,
+                    )
+                    return None
+                else:
+                    url = item.get("play_url") or ""
+                    if not url:
+                        raise RuntimeError("missing audio url")
+                    mc = cast.media_controller
+                    mc.play_media(url, "audio/mpeg")
+                    with self._lock:
+                        self._play_start = time.time()
+                        self._media_duration_local = int(item.get("duration") or 0)
+                        self.status = "playing"
+                    print(
+                        f"Stream: playing audio [{self.current_index + 1}/{len(self.playlist)}] {item.get('title')}",
+                        flush=True,
+                    )
+                    return None
+            except Exception as e:
+                print(
+                    f"Stream: skipping unavailable {item.get('title')}: {e}",
+                    flush=True,
+                )
+                with self._lock:
+                    iid = _item_id(item)
+                    if iid:
+                        self.played_ids.add(iid)
+                    self.current_index += 1
+        with self._lock:
+            self.status = "connected_idle"
+        return "all items unavailable"
+
+    def _advance_and_play(self) -> str | None:
+        """After finish/skip of current item: record, advance, maybe replan, play next."""
+        if self._past_stop_time():
+            with self._lock:
+                self._do_stop()
+            return "past stop time"
+        with self._lock:
+            cur = None
+            if 0 <= self.current_index < len(self.playlist):
+                cur = dict(self.playlist[self.current_index])
+            self._record_progress_locked(cur)
+            self.current_index += 1
+            # If remaining lacks both kinds, replan from latest cache before play
+            if not self._ensure_mixed_playlist_locked():
+                self.status = "connected_idle"
+                return "playlist empty"
+        return self._play_current()
+
+    def _monitor_loop(self):
+        prev_state = "UNKNOWN"
+        while not self._stop_event.is_set():
+            try:
+                if self._past_stop_time():
+                    with self._lock:
+                        if self.status == "playing":
+                            print("Stream: auto-stop at stop_time", flush=True)
+                            self._do_stop()
+                    self._stop_event.wait(2)
+                    continue
+
+                cast = self._cast
+                if cast is None:
+                    self._stop_event.wait(2)
+                    continue
+
+                with self._lock:
+                    playing = self.status == "playing"
+
+                if not playing:
+                    self._stop_event.wait(2)
+                    continue
+
+                mc = cast.media_controller
+                mc.update_status()
+                state = mc.status.player_state
+                idle_reason = mc.status.idle_reason
+
+                should_next = False
+                with self._lock:
+                    if self.status == "playing":
+                        if (
+                            state == "IDLE"
+                            and prev_state in ("PLAYING", "BUFFERING")
+                            and idle_reason == "FINISHED"
+                        ):
+                            should_next = True
+
+                if should_next:
+                    err = self._advance_and_play()
+                    if err:
+                        print(f"Stream: advance stopped: {err}", flush=True)
+
+                prev_state = state
+            except Exception as e:
+                print(f"Stream monitor error: {e}", flush=True)
+            self._stop_event.wait(2)
+
+    def _do_stop(self):
+        self._play_start = 0
+        self._media_duration_local = 0
+        self.current_index = -1
+        self.playlist = []
+        self.total_played_sec = 0.0
+        self.screen_played_sec = 0.0
+        self.played_ids.clear()
+        try:
+            if self._cast:
+                mc = self._cast.media_controller
+                mc.stop()
+                time.sleep(0.5)
+                self._cast.quit_app()
+                time.sleep(1)
+                self._cast.disconnect()
+        except Exception:
+            pass
+        self._cast = None
+        self.status = "disconnected"
+        self.device_name = ""
+        if self._browser:
+            try:
+                self._browser.stop_discovery()
+            except Exception:
+                pass
+            self._browser = None
+
+    def start(self):
+        super().start()
+        self._feed_stop_event.clear()
+        self._feed_thread = threading.Thread(target=self._feed_fetch_loop, daemon=True)
+        self._feed_thread.start()
+        print("Stream: ready")
+
+    def stop(self):
+        self._stop_event.set()
+        self._feed_stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+        if self._feed_thread:
+            self._feed_thread.join(timeout=5)
+        self._do_stop()
+        super().stop()
+        print("Stream: stopped")
+
+    def register_routes(self, app):
+        from fastapi import Request
+
+        @self.router.get("/status")
+        async def status():
+            with self._lock:
+                curr_idx = self.current_index
+                playlist = [dict(x) for x in self.playlist]
+                current = None
+                if 0 <= curr_idx < len(playlist):
+                    current = dict(playlist[curr_idx])
+                elapsed = (
+                    time.time() - self._play_start
+                    if self.status == "playing" and self._play_start > 0
+                    else 0
+                )
+                return {
+                    "status": self.status,
+                    "device_name": self.device_name,
+                    "playlist": playlist,
+                    "current_index": curr_idx,
+                    "current": current,
+                    "queue_count": len(playlist),
+                    "channel_enabled": dict(self.channel_enabled),
+                    "feeds": {
+                        name: {
+                            "url": info.get("url", ""),
+                            "enabled": info.get("enabled", True),
+                        }
+                        for name, info in self.feeds.items()
+                    },
+                    "stop_time": self.stop_time.strftime("%H:%M"),
+                    "past_stop_time": self._past_stop_time(),
+                    "media_position": elapsed,
+                    "media_duration": self._media_duration_local,
+                    "screen_played_sec": self.screen_played_sec,
+                    "total_played_sec": self.total_played_sec,
+                    "params": {
+                        "screen_minutes_per_hour": self.screen_minutes_per_hour,
+                        "max_video_minutes": self.max_video_minutes,
+                        "max_audio_minutes": self.max_audio_minutes,
+                        "playlist_horizon_hours": self.playlist_horizon_hours,
+                    },
+                }
+
+        @self.router.post("/connect")
+        async def connect():
+            import asyncio
+
+            with self._lock:
+                if self._cast:
+                    return {"ok": True, "device": self.device_name}
+            loop = asyncio.get_event_loop()
+            cast = await loop.run_in_executor(None, self._discover)
+            if cast is None:
+                return {"ok": False, "error": "no device found"}
+            with self._lock:
+                self._cast = cast
+                self.device_name = cast.name
+                self.status = "connected_idle"
+            return {"ok": True, "device": cast.name}
+
+        @self.router.post("/play")
+        async def play():
+            import asyncio
+
+            if self._past_stop_time():
+                return {"ok": False, "error": "past stop time"}
+            with self._lock:
+                if self._cast is None:
+                    return {"ok": False, "error": "not connected"}
+                if self.status == "playing":
+                    return {"ok": False, "error": "already playing"}
+                self.total_played_sec = 0.0
+                self.screen_played_sec = 0.0
+                self.played_ids.clear()
+                if not self._replan_locked(allow_replay=False):
+                    if not self._replan_locked(allow_replay=True):
+                        return {"ok": False, "error": "playlist empty, try again later"}
+                if self._thread is None or not self._thread.is_alive():
+                    self._stop_event.clear()
+                    self._thread = threading.Thread(
+                        target=self._monitor_loop, daemon=True
+                    )
+                    self._thread.start()
+            loop = asyncio.get_event_loop()
+            err = await loop.run_in_executor(None, self._play_current)
+            if err:
+                with self._lock:
+                    self.current_index = -1
+                    self.playlist = []
+                    if self.status == "playing":
+                        self.status = "connected_idle"
+                return {"ok": False, "error": err}
+            return {"ok": True}
+
+        @self.router.post("/stop")
+        async def stop_route():
+            import asyncio
+
+            loop = asyncio.get_event_loop()
+
+            def _locked_stop():
+                with self._lock:
+                    self._do_stop()
+
+            await loop.run_in_executor(None, _locked_stop)
+            return {"ok": True}
+
+        @self.router.post("/skip")
+        async def skip():
+            import asyncio
+
+            if self._past_stop_time():
+                with self._lock:
+                    self._do_stop()
+                return {"ok": False, "error": "past stop time"}
+            with self._lock:
+                if self.status != "playing":
+                    return {"ok": False, "error": "not playing"}
+            loop = asyncio.get_event_loop()
+            if self._cast:
+                try:
+                    await loop.run_in_executor(
+                        None, lambda: self._cast.media_controller.stop()
+                    )
+                except Exception:
+                    pass
+            err = await loop.run_in_executor(None, self._advance_and_play)
+            if err:
+                return {"ok": False, "error": err}
+            return {"ok": True}
+
+        @self.router.post("/stop_time")
+        async def stop_time_route(request: Request):
+            data = await request.json()
+            time_str = data.get("time", "")
+            if time_str:
+                with self._lock:
+                    self.stop_time = parse_time(time_str)
+                self._save_config()
+                if self._past_stop_time():
+                    with self._lock:
+                        if self.status == "playing":
+                            self._do_stop()
+            return {"ok": True, "stop_time": self.stop_time.strftime("%H:%M")}
+
+        @self.router.post("/toggle_channel")
+        async def toggle_channel(request: Request):
+            data = await request.json()
+            handle = data.get("handle", "")
+            enabled = data.get("enabled", True)
+            with self._lock:
+                if handle in self.channel_enabled:
+                    self.channel_enabled[handle] = enabled
+            self._save_config()
+            return {"ok": True}
+
+        @self.router.post("/add_channel")
+        async def add_channel(request: Request):
+            import asyncio
+
+            data = await request.json()
+            handle = data.get("handle", "").strip()
+            if not handle:
+                return {"ok": False, "error": "Enter a channel handle"}
+            if not handle.startswith("@"):
+                handle = "@" + handle
+            with self._lock:
+                if handle in self.channel_enabled:
+                    return {"ok": False, "error": "Channel already added"}
+            loop = asyncio.get_event_loop()
+            cid = await loop.run_in_executor(None, _resolve_channel_id, handle)
+            if cid is None:
+                return {"ok": False, "error": "Channel not found — check spelling"}
+            with self._lock:
+                self.channel_enabled[handle] = True
+                self.channels = list(self.channel_enabled.keys())
+                self._yt_cache[handle] = []
+            self._save_config()
+            return {"ok": True, "handle": handle}
+
+        @self.router.post("/toggle_feed")
+        async def toggle_feed(request: Request):
+            data = await request.json()
+            feed_name = data.get("feed_name", "")
+            enabled = data.get("enabled", True)
+            with self._lock:
+                if feed_name in self.feeds:
+                    self.feeds[feed_name]["enabled"] = enabled
+            self._save_config()
+            return {"ok": True}
+
+        @self.router.post("/add_feed")
+        async def add_feed(request: Request):
+            import asyncio
+
+            data = await request.json()
+            url = (data.get("url") or "").strip()
+            if not url:
+                return {"ok": False, "error": "Enter a feed URL"}
+            with self._lock:
+                for name, info in self.feeds.items():
+                    if info.get("url") == url:
+                        return {"ok": False, "error": f'Feed already exists: "{name}"'}
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, _validate_feed, url)
+            if not result.get("ok"):
+                return {"ok": False, "error": result.get("error", "Invalid feed")}
+            feed_title = result["title"]
+            with self._lock:
+                if feed_title in self.feeds:
+                    return {
+                        "ok": False,
+                        "error": f'Feed "{feed_title}" already exists',
+                    }
+                self.feeds[feed_title] = {"url": url, "enabled": True}
+                self._pc_cache[feed_title] = []
+            self._save_config()
+            return {"ok": True, "feed_name": feed_title}
+
+        app.include_router(self.router)
+
+    def ui_section(self) -> str:
+        return """
+        <div class="plugin-section" id="plugin-stream">
+          <div class="yt-status-line" id="st-status">Disconnected</div>
+          <div id="st-errmsg" style="display:none; padding:8px 12px; background:#2a1515; border:1px solid #ff4444; border-radius:8px; font-size:13px; color:#ff8888; margin-bottom:12px"></div>
+
+          <div class="auto-stop-row">
+            <span class="auto-stop-label">Auto-stop</span>
+            <span class="auto-stop-value" id="st-stop-time-display" onclick="stEditStopTime()">--:--</span>
+            <input type="time" id="st-stop-time-input" style="display:none" onchange="stSaveStopTime()">
+          </div>
+
+          <details class="collapsible" id="st-channels-section">
+            <summary>Channels</summary>
+            <div class="series-pills" id="st-channel-pills"></div>
+            <div class="yt-add-channel-row">
+              <input type="text" id="st-add-channel-input" placeholder="@channelname" maxlength="100" onkeydown="if(event.key==='Enter')stAddChannel()">
+              <button onclick="stAddChannel()">+ Add</button>
+            </div>
+          </details>
+
+          <details class="collapsible" id="st-feeds-section">
+            <summary>Podcasts</summary>
+            <div class="series-pills" id="st-feed-pills"></div>
+            <div class="yt-add-channel-row">
+              <input type="text" id="st-add-feed-input" placeholder="https://example.com/feed.xml" maxlength="500" onkeydown="if(event.key==='Enter')stAddFeed()">
+              <button onclick="stAddFeed()">+ Add</button>
+            </div>
+          </details>
+
+          <div class="transport" id="st-controls" style="gap:12px">
+            <button class="transport-btn transport-play" onclick="stPlay()" id="st-play-btn">&#x25B6;</button>
+            <button class="transport-btn transport-play stop-btn" onclick="stStop()" id="st-stop-btn" style="display:none">&#x23F9;</button>
+            <button class="transport-btn" onclick="stSkip()" id="st-skip-btn" style="display:none">&#x23ED;</button>
+          </div>
+
+          <div class="series-picker" id="st-queue-section" style="display:none">
+            <div class="series-label" style="display:flex; justify-content:space-between; align-items:center">
+              <span>Playlist</span>
+              <span id="st-queue-count" style="font-size:12px; color:var(--text-dim)">0</span>
+            </div>
+            <div id="st-queue-list" style="max-height:360px; overflow-y:auto; margin-top:8px"></div>
+          </div>
+        </div>
+        """
+
+    def ui_js(self) -> str:
+        return r"""
+        let stState = {};
+
+        function stShowError(msg) {
+          const el = document.getElementById('st-errmsg');
+          el.textContent = msg;
+          el.style.display = '';
+          setTimeout(function(){ el.style.display = 'none'; }, 10000);
+        }
+        function stHideError() {
+          document.getElementById('st-errmsg').style.display = 'none';
+        }
+        async function stFetch(url, body) {
+          try {
+            const opts = { method: 'POST' };
+            if (body) { opts.body = JSON.stringify(body); opts.headers = { 'Content-Type': 'application/json' }; }
+            const ctrl = new AbortController();
+            var t = setTimeout(function() { ctrl.abort(); }, 60000);
+            opts.signal = ctrl.signal;
+            const r = await fetch(url, opts);
+            clearTimeout(t);
+            return await r.json();
+          } catch(e) { console.error(e); return null; }
+        }
+        function stEsc(s) { return (''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+        function stFormatDate(ts) {
+          if (!ts) return '';
+          var d = new Date(ts * 1000);
+          var m = d.getMonth() + 1, day = d.getDate();
+          return (m < 10 ? '0' : '') + m + '/' + (day < 10 ? '0' : '') + day;
+        }
+        function stFmtDur(sec) {
+          sec = Math.floor(sec || 0);
+          var m = Math.floor(sec / 60), s = sec % 60;
+          return m + ':' + (s < 10 ? '0' : '') + s;
+        }
+        function stApplyScroll(row, text) {
+          var el = row.querySelector('.yt-qi-title');
+          if (!el || el.scrollWidth <= el.clientWidth) return;
+          var e2 = stEsc(text);
+          el.innerHTML = '<span class="scroll-wrap" style="--dur:' + Math.max(6, text.length / 6) + 's"><span>' + e2 + '&nbsp;&nbsp;&nbsp;</span><span aria-hidden="true">' + e2 + '&nbsp;&nbsp;&nbsp;</span></span>';
+        }
+
+        async function stConnect() {
+          stHideError();
+          const r = await stFetch('/api/stream/connect');
+          if (!r || !r.ok) stShowError(r ? r.error : 'Connect failed');
+        }
+        async function stPlay() {
+          stHideError();
+          if (stState.status === 'disconnected') {
+            const r = await stFetch('/api/stream/connect');
+            if (!r || !r.ok) { stShowError(r ? r.error : 'Connect failed'); return; }
+          }
+          const r2 = await stFetch('/api/stream/play');
+          if (!r2 || !r2.ok) stShowError(r2 ? r2.error : 'Play failed');
+        }
+        async function stStop() {
+          await stFetch('/api/stream/stop');
+        }
+        async function stSkip() {
+          const r = await stFetch('/api/stream/skip');
+          if (r && !r.ok && r.error) stShowError(r.error);
+        }
+        function stEditStopTime() {
+          var input = document.getElementById('st-stop-time-input');
+          if (input.showPicker) input.showPicker(); else input.click();
+        }
+        async function stSaveStopTime() {
+          var val = document.getElementById('st-stop-time-input').value;
+          if (val) {
+            document.getElementById('st-stop-time-display').textContent = val;
+            await stFetch('/api/stream/stop_time', { time: val });
+          }
+        }
+        async function stToggleChannel(handle, enabled) {
+          await stFetch('/api/stream/toggle_channel', { handle: handle, enabled: enabled });
+        }
+        async function stAddChannel() {
+          const input = document.getElementById('st-add-channel-input');
+          const handle = (input.value || '').trim();
+          if (!handle) return;
+          const r = await stFetch('/api/stream/add_channel', { handle: handle });
+          if (r && r.ok) input.value = '';
+          else stShowError(r ? r.error : 'Failed to add channel');
+        }
+        async function stToggleFeed(feedName, enabled) {
+          await stFetch('/api/stream/toggle_feed', { feed_name: feedName, enabled: enabled });
+        }
+        async function stAddFeed() {
+          const input = document.getElementById('st-add-feed-input');
+          const url = (input.value || '').trim();
+          if (!url) return;
+          const r = await stFetch('/api/stream/add_feed', { url: url });
+          if (r && r.ok) input.value = '';
+          else stShowError(r ? r.error : 'Failed to add feed');
+        }
+
+        var stQueueFingerprint = '';
+        var stPrevIndex = -1;
+        function stRenderQueue(s) {
+          const container = document.getElementById('st-queue-list');
+          const section = document.getElementById('st-queue-section');
+          const idx = s.current_index;
+          const isEmpty = !s.playlist || !s.playlist.length;
+          if (isEmpty) {
+            stQueueFingerprint = '';
+            stPrevIndex = -1;
+            section.style.display = 'none';
+            return;
+          }
+          section.style.display = '';
+          var fp = JSON.stringify(s.playlist.map(function(v) { return v.id + '|' + (v.duration || ''); }));
+          var sameData = fp === stQueueFingerprint;
+          var sameIdx = idx === stPrevIndex;
+          if (sameData && sameIdx) {
+            // still update progress bar only
+          } else if (sameData) {
+            var oldIdx = stPrevIndex;
+            stPrevIndex = idx;
+            var oldRow = oldIdx >= 0 && oldIdx < container.children.length ? container.children[oldIdx] : null;
+            if (oldRow) {
+              oldRow.className = 'yt-queue-item';
+              var oldTitleEl = oldRow.querySelector('.yt-qi-title');
+              if (oldTitleEl && s.playlist[oldIdx]) oldTitleEl.textContent = s.playlist[oldIdx].title || '';
+            }
+            var newRow = idx >= 0 && idx < container.children.length ? container.children[idx] : null;
+            if (newRow) {
+              newRow.className = 'yt-queue-item' + (s.status === 'playing' ? ' playing' : '') + ' current';
+              var titleEl = newRow.querySelector('.yt-qi-title');
+              if (titleEl && s.playlist[idx]) titleEl.textContent = s.playlist[idx].title || '';
+              stApplyScroll(newRow, s.playlist[idx].title || '');
+            }
+          } else {
+            stQueueFingerprint = fp;
+            stPrevIndex = idx;
+            let html = '';
+            for (let i = 0; i < s.playlist.length; i++) {
+              const v = s.playlist[i];
+              const isCurrent = i === idx;
+              const playing = isCurrent && s.status === 'playing';
+              const cls = 'yt-queue-item' + (playing ? ' playing' : '') + (isCurrent ? ' current' : '');
+              const kind = v.kind === 'video' ? 'V' : 'A';
+              const dur = v.duration ? stFmtDur(v.duration) : '';
+              const title = v.title || '', escaped2 = stEsc(title);
+              html += '<div class="' + cls + '">' +
+                '<span class="yt-qi-indicator">' + kind + '</span>' +
+                '<span class="yt-qi-date">' + (v.published ? stFormatDate(v.published) : '') + '</span>' +
+                '<span class="yt-qi-handle">' + stEsc((v.source || '').replace('@', '')).substring(0, 14) + '</span>' +
+                '<span class="yt-qi-title">' + escaped2 + '</span>' +
+                '<span class="yt-qi-dur">' + dur + '</span>' +
+                '</div>';
+            }
+            container.innerHTML = html;
+            if (idx >= 0 && idx < s.playlist.length) {
+              var el = container.children[idx];
+              if (el) {
+                el.scrollIntoView({ block: 'nearest' });
+                stApplyScroll(el, s.playlist[idx].title || '');
+              }
+            }
+          }
+          // progress bar on current row
+          var rows = container.children;
+          for (var ri = 0; ri < rows.length; ri++) {
+            var oldBars = rows[ri].querySelectorAll('.yt-qi-progress');
+            oldBars.forEach(function(el){ el.remove(); });
+          }
+          if (s.status === 'playing' && s.media_duration > 0 && idx >= 0 && rows[idx]) {
+            var pct = Math.min(100, Math.max(0, (s.media_position || 0) / s.media_duration * 100));
+            var bar = document.createElement('div');
+            bar.className = 'yt-qi-progress';
+            bar.innerHTML = '<div class="yt-qi-progress-fill" style="width:' + pct + '%"></div>';
+            rows[idx].appendChild(bar);
+          }
+          var totalSec = 0;
+          (s.playlist || []).forEach(function(v){ totalSec += (v.duration || 0); });
+          document.getElementById('st-queue-count').textContent =
+            (s.playlist || []).length + ' · ' + stFmtDur(totalSec);
+        }
+
+        function stRenderChannels(s) {
+          const container = document.getElementById('st-channel-pills');
+          if (!s.channel_enabled) return;
+          const handles = Object.keys(s.channel_enabled);
+          container.innerHTML = handles.map(function(h) {
+            const checked = s.channel_enabled[h];
+            const label = h.replace('@', '');
+            return '<label class="yt-ch-label' + (checked ? ' active' : '') + '" ' +
+              'onclick="stToggleChannel(\\'' + h + '\\', ' + (!checked) + ')">' +
+              stEsc(label) + '</label>';
+          }).join('');
+        }
+        function stRenderFeeds(s) {
+          const container = document.getElementById('st-feed-pills');
+          if (!s.feeds) return;
+          const names = Object.keys(s.feeds);
+          container.innerHTML = names.map(function(n) {
+            const checked = s.feeds[n].enabled;
+            return '<label class="yt-ch-label' + (checked ? ' active' : '') + '" ' +
+              'onclick="stToggleFeed(decodeURIComponent(\'' + encodeURIComponent(n) + '\'), ' + (!checked) + ')">' +
+              stEsc(n).substring(0, 18) + '</label>';
+          }).join('');
+        }
+
+        async function stPoll() {
+          try {
+            const r = await fetch('/api/stream/status');
+            const s = await r.json();
+            stState = s;
+            var statusEl = document.getElementById('st-status');
+            if (s.status === 'disconnected') {
+              statusEl.textContent = 'Disconnected';
+            } else if (s.status === 'connected_idle') {
+              statusEl.textContent = 'Connected: ' + (s.device_name || '');
+            } else if (s.status === 'playing' && s.current) {
+              var k = s.current.kind === 'video' ? '▶' : '🎧';
+              statusEl.textContent = k + ' ' + (s.current.title || '');
+            } else {
+              statusEl.textContent = s.status;
+            }
+            if (s.past_stop_time) {
+              statusEl.textContent += ' · past stop time';
+            }
+            document.getElementById('st-stop-time-display').textContent = s.stop_time || '--:--';
+            document.getElementById('st-stop-time-input').value = s.stop_time || '';
+            document.getElementById('st-play-btn').style.display = s.status === 'playing' ? 'none' : '';
+            document.getElementById('st-stop-btn').style.display = s.status === 'playing' ? '' : 'none';
+            document.getElementById('st-skip-btn').style.display = s.status === 'playing' ? '' : 'none';
+            stRenderQueue(s);
+            stRenderChannels(s);
+            stRenderFeeds(s);
+          } catch(e) { console.error(e); }
+        }
+        setInterval(stPoll, 1500);
+        stPoll();
+        """

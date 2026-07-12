@@ -31,3 +31,17 @@ plugins:
   yt_cast:
     channel_enabled: {}      # YouTube channel handles + enabled state, e.g. "@channelname": true
     uncast_duration: 40      # Auto-stop after N minutes (0 = no auto-stop)
+
+  stream:
+    screen_minutes_per_hour: 12   # Target visual share of played content
+    max_video_minutes: 30         # Drop videos longer than this
+    max_audio_minutes: 30         # Drop podcasts longer than this
+    playlist_horizon_hours: 3.5   # Coverage budget for pool build
+    yt_fetch_per_channel: 8
+    podcast_keep_per_feed: 10
+    feed_interval: 60
+    schedule:
+      stop_time: "21:00"          # Clock time auto-stop (like audio_player)
+    channel_enabled: {}           # Same shape as yt_cast — copy from there
+    channels: []
+    feeds: {}                     # Same shape as podcast_player — copy from there
