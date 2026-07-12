@@ -24,6 +24,20 @@ def parse_time(time_str: str) -> dtime:
     return dtime(int(parts[0]), int(parts[1]))
 
 
+def parse_youtube_id(value: str) -> str | None:
+    """Accept bare 11-char id or common YouTube URL forms."""
+    s = (value or "").strip()
+    if not s:
+        return None
+    if re.fullmatch(r"[\w-]{11}", s):
+        return s
+    m = re.search(
+        r"(?:v=|/youtu\.be/|/embed/|/shorts/|youtube\.com/watch\?.*?v=)([\w-]{11})",
+        s,
+    )
+    return m.group(1) if m else None
+
+
 CHANNEL_IDS = {
     "@likenastyaofficial": "UCJplp5SjeGSdVdwsfb9Q7lQ",
     "@ArtforKidsHub": "UC5XMF3Inoi8R9nSI8ChOsdQ",
@@ -277,6 +291,7 @@ class StreamPlugin(Plugin):
 
         sched = config.get("schedule") or {}
         self.stop_time = parse_time(sched.get("stop_time", "21:00"))
+        self.outro_video_url: str = str(config.get("outro_video_url", "") or "")
 
         self.channel_enabled: dict[str, bool] = dict(
             config.get("channel_enabled", {})
@@ -303,6 +318,7 @@ class StreamPlugin(Plugin):
         self._feed_stop_event = threading.Event()
         self._play_start: float = 0.0
         self._media_duration_local: int = 0
+        self._outro_playing: bool = False
         # Separate ydl instances so YT feed thread and play resolve never share one
         self._ydl = yt_dlp.YoutubeDL(
             {
@@ -364,6 +380,7 @@ class StreamPlugin(Plugin):
                 "schedule": {
                     "stop_time": self.stop_time.strftime("%H:%M"),
                 },
+                "outro_video_url": self.outro_video_url,
                 "channel_enabled": dict(self.channel_enabled),
                 "feeds": {
                     name: {"url": info["url"], "enabled": info.get("enabled", True)}
@@ -655,9 +672,13 @@ class StreamPlugin(Plugin):
 
     def _advance_and_play(self) -> str | None:
         """After finish/skip of current item: record, advance, maybe replan, play next."""
-        if self._past_stop_time():
-            with self._lock:
+        with self._lock:
+            if self._outro_playing or self.status == "ending":
                 self._do_stop()
+                return "outro ended"
+        if self._past_stop_time():
+            # Auto-stop path: prefer outro over hard stop
+            self._begin_auto_stop()
             return "past stop time"
         with self._lock:
             cur = None
@@ -671,27 +692,137 @@ class StreamPlugin(Plugin):
                 return "playlist empty"
         return self._play_current()
 
+    def _begin_auto_stop(self):
+        """Called when stop_time is reached during normal play (not manual stop)."""
+        with self._lock:
+            if self._outro_playing or self.status == "ending":
+                return
+            if self.status != "playing":
+                return
+            url = (self.outro_video_url or "").strip()
+            if not url:
+                print("Stream: auto-stop at stop_time (no outro)", flush=True)
+                self._do_stop()
+                return
+        print("Stream: auto-stop → playing outro", flush=True)
+        err = self._start_outro()
+        if err:
+            print(f"Stream: outro failed ({err}), full stop", flush=True)
+            with self._lock:
+                self._do_stop()
+
+    def _start_outro(self) -> str | None:
+        """Stop current media (keep cast) and play configured outro video."""
+        vid = parse_youtube_id(self.outro_video_url)
+        if not vid:
+            return "invalid outro url"
+        with self._lock:
+            cast = self._cast
+            if cast is None:
+                return "not connected"
+            try:
+                cast.media_controller.stop()
+            except Exception:
+                pass
+            self._outro_playing = True
+            self.status = "ending"
+            self.playlist = [
+                {
+                    "id": f"v:{vid}",
+                    "kind": "video",
+                    "title": "Goodnight",
+                    "published": int(time.time()),
+                    "duration": 0,
+                    "source": "outro",
+                    "play_url": "",
+                    "video_id": vid,
+                    "link": f"https://youtube.com/watch?v={vid}",
+                }
+            ]
+            self.current_index = 0
+            self._play_start = 0
+            self._media_duration_local = 0
+        try:
+            info = self._ydl_play.extract_info(
+                f"https://youtube.com/watch?v={vid}", download=False
+            )
+            url = info.get("url")
+            dur = int(info.get("duration") or 0)
+            title = info.get("title") or "Goodnight"
+            if not url:
+                return "could not resolve outro URL"
+            cast.media_controller.play_media(url, "video/mp4")
+            with self._lock:
+                if self.playlist:
+                    self.playlist[0]["duration"] = dur
+                    self.playlist[0]["title"] = title
+                    self.playlist[0]["play_url"] = url
+                self._play_start = time.time()
+                self._media_duration_local = dur
+                self._outro_playing = True
+                self.status = "ending"
+            print(f"Stream: outro playing — {title} ({dur}s)", flush=True)
+            return None
+        except Exception as e:
+            return str(e)
+
     def _monitor_loop(self):
         prev_state = "UNKNOWN"
         while not self._stop_event.is_set():
             try:
-                if self._past_stop_time():
-                    with self._lock:
-                        if self.status == "playing":
-                            print("Stream: auto-stop at stop_time", flush=True)
+                with self._lock:
+                    status = self.status
+                    outro = self._outro_playing
+                    cast = self._cast
+                    play_start = self._play_start
+                    media_dur = self._media_duration_local
+                past = self._past_stop_time()
+
+                # Outro in progress: wait for finish, then full stop
+                if outro or status == "ending":
+                    if cast is None:
+                        with self._lock:
                             self._do_stop()
-                    self._stop_event.wait(2)
+                        prev_state = "UNKNOWN"
+                        self._stop_event.wait(1)
+                        continue
+                    try:
+                        mc = cast.media_controller
+                        mc.update_status()
+                        state = mc.status.player_state
+                        idle_reason = mc.status.idle_reason
+                    except Exception as e:
+                        print(f"Stream outro monitor: {e}", flush=True)
+                        state, idle_reason = "UNKNOWN", None
+                    finished = (
+                        state == "IDLE"
+                        and prev_state in ("PLAYING", "BUFFERING")
+                        and idle_reason == "FINISHED"
+                    )
+                    elapsed = time.time() - play_start if play_start > 0 else 0
+                    timed_out = media_dur > 0 and elapsed >= media_dur + 5
+                    if finished or timed_out:
+                        print("Stream: outro done, full stop", flush=True)
+                        with self._lock:
+                            self._do_stop()
+                        prev_state = "UNKNOWN"
+                    else:
+                        prev_state = state
+                    self._stop_event.wait(1)
                     continue
 
-                cast = self._cast
+                # Auto-stop time: start outro (or hard stop if none)
+                if past and status == "playing":
+                    self._begin_auto_stop()
+                    prev_state = "UNKNOWN"
+                    self._stop_event.wait(1)
+                    continue
+
                 if cast is None:
                     self._stop_event.wait(2)
                     continue
 
-                with self._lock:
-                    playing = self.status == "playing"
-
-                if not playing:
+                if status != "playing":
                     self._stop_event.wait(2)
                     continue
 
@@ -702,7 +833,7 @@ class StreamPlugin(Plugin):
 
                 should_next = False
                 with self._lock:
-                    if self.status == "playing":
+                    if self.status == "playing" and not self._outro_playing:
                         if (
                             state == "IDLE"
                             and prev_state in ("PLAYING", "BUFFERING")
@@ -728,6 +859,7 @@ class StreamPlugin(Plugin):
         self.total_played_sec = 0.0
         self.screen_played_sec = 0.0
         self.played_ids.clear()
+        self._outro_playing = False
         try:
             if self._cast:
                 mc = self._cast.media_controller
@@ -776,7 +908,7 @@ class StreamPlugin(Plugin):
         @self.router.get("/status")
         async def status():
             with self._lock:
-                if self.status == "playing":
+                if self.status in ("playing", "ending"):
                     playlist = [dict(x) for x in self.playlist]
                     curr_idx = self.current_index
                 else:
@@ -788,7 +920,7 @@ class StreamPlugin(Plugin):
                     current = dict(playlist[curr_idx])
                 elapsed = (
                     time.time() - self._play_start
-                    if self.status == "playing" and self._play_start > 0
+                    if self.status in ("playing", "ending") and self._play_start > 0
                     else 0
                 )
                 return {
@@ -808,6 +940,8 @@ class StreamPlugin(Plugin):
                     },
                     "stop_time": self.stop_time.strftime("%H:%M"),
                     "past_stop_time": self._past_stop_time(),
+                    "outro_video_url": self.outro_video_url,
+                    "outro_playing": self._outro_playing,
                     "media_position": elapsed,
                     "media_duration": self._media_duration_local,
                     "screen_played_sec": self.screen_played_sec,
@@ -888,10 +1022,17 @@ class StreamPlugin(Plugin):
         async def skip():
             import asyncio
 
-            if self._past_stop_time():
-                with self._lock:
+            with self._lock:
+                # During outro, Skip means confirm end → full stop
+                if self._outro_playing or self.status == "ending":
                     self._do_stop()
-                return {"ok": False, "error": "past stop time"}
+                    return {"ok": True}
+            if self._past_stop_time():
+                # Trigger auto-stop path (outro or hard stop), not a normal skip
+                await asyncio.get_event_loop().run_in_executor(
+                    None, self._begin_auto_stop
+                )
+                return {"ok": True}
             with self._lock:
                 if self.status != "playing":
                     return {"ok": False, "error": "not playing"}
@@ -938,6 +1079,8 @@ class StreamPlugin(Plugin):
                 if "playlist_horizon_hours" in data:
                     v = float(data["playlist_horizon_hours"])
                     self.playlist_horizon_hours = max(0.5, min(24.0, v))
+                if "outro_video_url" in data:
+                    self.outro_video_url = str(data.get("outro_video_url") or "").strip()
             self._save_config()
             with self._lock:
                 return {
@@ -948,6 +1091,7 @@ class StreamPlugin(Plugin):
                         "max_audio_minutes": self.max_audio_minutes,
                         "playlist_horizon_hours": self.playlist_horizon_hours,
                     },
+                    "outro_video_url": self.outro_video_url,
                 }
 
         @self.router.post("/toggle_channel")
@@ -1062,6 +1206,13 @@ class StreamPlugin(Plugin):
                 <span class="auto-stop-label">Horizon (hours)</span>
                 <input type="number" id="st-param-horizon" min="0.5" max="24" step="0.5"
                   style="width:72px;background:var(--card-hover);border:1px solid #333;border-radius:8px;color:var(--accent);font-size:18px;font-weight:500;padding:6px 8px;text-align:right"
+                  onchange="stSaveSettings()">
+              </div>
+              <div style="padding:4px 0 0">
+                <div class="auto-stop-label" style="margin-bottom:6px">Outro video (at stop time)</div>
+                <input type="text" id="st-param-outro" placeholder="https://youtube.com/watch?v=… or video id"
+                  maxlength="200"
+                  style="width:100%;box-sizing:border-box;background:var(--card-hover);border:1px solid #333;border-radius:8px;color:var(--text);font-size:13px;padding:10px 12px"
                   onchange="stSaveSettings()">
               </div>
             </div>
@@ -1186,9 +1337,11 @@ class StreamPlugin(Plugin):
           }
         }
         var stParamsFp = '';
-        function stFillParams(p) {
+        function stFillParams(s) {
+          var p = s.params;
           if (!p) return;
-          var fp = [p.screen_minutes_per_hour, p.max_video_minutes, p.max_audio_minutes, p.playlist_horizon_hours].join('|');
+          var outro = s.outro_video_url || '';
+          var fp = [p.screen_minutes_per_hour, p.max_video_minutes, p.max_audio_minutes, p.playlist_horizon_hours, outro].join('|');
           if (fp === stParamsFp) return;
           // Don't overwrite while user is editing an input
           var ae = document.activeElement;
@@ -1198,6 +1351,7 @@ class StreamPlugin(Plugin):
           document.getElementById('st-param-max-video').value = p.max_video_minutes;
           document.getElementById('st-param-max-audio').value = p.max_audio_minutes;
           document.getElementById('st-param-horizon').value = p.playlist_horizon_hours;
+          document.getElementById('st-param-outro').value = outro;
         }
         async function stSaveSettings() {
           stHideError();
@@ -1205,7 +1359,8 @@ class StreamPlugin(Plugin):
             screen_minutes_per_hour: parseFloat(document.getElementById('st-param-screen').value),
             max_video_minutes: parseInt(document.getElementById('st-param-max-video').value, 10),
             max_audio_minutes: parseInt(document.getElementById('st-param-max-audio').value, 10),
-            playlist_horizon_hours: parseFloat(document.getElementById('st-param-horizon').value)
+            playlist_horizon_hours: parseFloat(document.getElementById('st-param-horizon').value),
+            outro_video_url: (document.getElementById('st-param-outro').value || '').trim()
           };
           if (isNaN(body.screen_minutes_per_hour) || isNaN(body.max_video_minutes) ||
               isNaN(body.max_audio_minutes) || isNaN(body.playlist_horizon_hours)) {
@@ -1217,10 +1372,8 @@ class StreamPlugin(Plugin):
             stShowError(r ? (r.error || 'Settings failed') : 'Settings failed');
             return;
           }
-          if (r.params) {
-            stParamsFp = '';
-            stFillParams(r.params);
-          }
+          stParamsFp = '';
+          stFillParams(r);
         }
         async function stToggleChannel(handle, enabled) {
           await stFetch('/api/stream/toggle_channel', { handle: handle, enabled: enabled });
@@ -1276,7 +1429,8 @@ class StreamPlugin(Plugin):
             }
             var newRow = idx >= 0 && idx < container.children.length ? container.children[idx] : null;
             if (newRow) {
-              newRow.className = 'yt-queue-item' + (s.status === 'playing' ? ' playing' : '') + ' current';
+              var act = (s.status === 'playing' || s.status === 'ending');
+              newRow.className = 'yt-queue-item' + (act ? ' playing' : '') + ' current';
               var titleEl = newRow.querySelector('.yt-qi-title');
               if (titleEl && s.playlist[idx]) titleEl.textContent = s.playlist[idx].title || '';
               stApplyScroll(newRow, s.playlist[idx].title || '');
@@ -1289,7 +1443,7 @@ class StreamPlugin(Plugin):
             for (let i = 0; i < s.playlist.length; i++) {
               const v = s.playlist[i];
               const isCurrent = i === idx;
-              const playing = isCurrent && s.status === 'playing';
+              const playing = isCurrent && (s.status === 'playing' || s.status === 'ending');
               const cls = 'yt-queue-item' + (playing ? ' playing' : '') + (isCurrent ? ' current' : '');
               const kind = v.kind === 'video' ? 'V' : 'A';
               const dur = v.duration ? stFmtDur(v.duration) : '';
@@ -1314,7 +1468,7 @@ class StreamPlugin(Plugin):
           // Progress: update in place like TV/Podcast (do not rebuild title)
           var oldBars = container.querySelectorAll('.yt-queue-item:not(.playing) .qi-progress');
           oldBars.forEach(function(el){ el.remove(); });
-          if (s.status === 'playing' && s.media_duration > 0 && idx >= 0) {
+          if ((s.status === 'playing' || s.status === 'ending') && s.media_duration > 0 && idx >= 0) {
             var row = container.querySelector('.yt-queue-item.playing') || container.children[idx];
             if (row) {
               var pct = Math.min(100, Math.max(0, (s.media_position || 0) / s.media_duration * 100));
@@ -1369,21 +1523,24 @@ class StreamPlugin(Plugin):
               statusEl.textContent = 'Disconnected';
             } else if (s.status === 'connected_idle') {
               statusEl.textContent = 'Connected: ' + (s.device_name || '');
+            } else if (s.status === 'ending') {
+              statusEl.textContent = 'Ending 🎵 ' + ((s.current && s.current.title) || 'Goodnight');
             } else if (s.status === 'playing' && s.current) {
               var k = s.current.kind === 'video' ? '▶' : '🎧';
               statusEl.textContent = k + ' ' + (s.current.title || '');
             } else {
               statusEl.textContent = s.status;
             }
-            if (s.past_stop_time) {
+            if (s.past_stop_time && s.status !== 'ending') {
               statusEl.textContent += ' · past stop time';
             }
             document.getElementById('st-stop-time-display').textContent = s.stop_time || '--:--';
             document.getElementById('st-stop-time-input').value = s.stop_time || '';
-            document.getElementById('st-play-btn').style.display = s.status === 'playing' ? 'none' : '';
-            document.getElementById('st-stop-btn').style.display = s.status === 'playing' ? '' : 'none';
-            document.getElementById('st-skip-btn').style.display = s.status === 'playing' ? '' : 'none';
-            stFillParams(s.params);
+            var active = (s.status === 'playing' || s.status === 'ending');
+            document.getElementById('st-play-btn').style.display = active ? 'none' : '';
+            document.getElementById('st-stop-btn').style.display = active ? '' : 'none';
+            document.getElementById('st-skip-btn').style.display = active ? '' : 'none';
+            stFillParams(s);
             stRenderQueue(s);
             stRenderChannels(s);
             stRenderFeeds(s);

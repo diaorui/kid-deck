@@ -42,5 +42,6 @@ plugins:
     feed_interval: 60
     schedule:
       stop_time: "21:00"          # Clock time auto-stop (like audio_player)
+    outro_video_url: ""           # YouTube URL/id played at stop_time, then full exit (empty = hard stop)
     channel_enabled: {}           # Same shape as yt_cast — copy from there
     feeds: {}                     # Same shape as podcast_player — copy from there
