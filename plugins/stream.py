@@ -281,11 +281,6 @@ class StreamPlugin(Plugin):
         self.channel_enabled: dict[str, bool] = dict(
             config.get("channel_enabled", {})
         )
-        self.channels: list[str] = list(self.channel_enabled.keys()) or list(
-            config.get("channels", [])
-        )
-        if self.channels and not self.channel_enabled:
-            self.channel_enabled = {h: True for h in self.channels}
         self.feeds: dict[str, dict] = dict(config.get("feeds", {}))
 
         self.status = "disconnected"
@@ -368,7 +363,6 @@ class StreamPlugin(Plugin):
                     "stop_time": self.stop_time.strftime("%H:%M"),
                 },
                 "channel_enabled": dict(self.channel_enabled),
-                "channels": list(self.channels),
                 "feeds": {
                     name: {"url": info["url"], "enabled": info.get("enabled", True)}
                     for name, info in self.feeds.items()
@@ -387,8 +381,8 @@ class StreamPlugin(Plugin):
         a_budget = self._audio_budget_sec()
 
         videos: list[dict] = []
-        for handle in self.channels:
-            if not self.channel_enabled.get(handle, True):
+        for handle, enabled in self.channel_enabled.items():
+            if not enabled:
                 continue
             for raw in self._yt_cache.get(handle, []):
                 item = _normalize_video(raw)
@@ -512,7 +506,7 @@ class StreamPlugin(Plugin):
         first_pass = True
         while not self._feed_stop_event.is_set():
             with self._lock:
-                handles = list(self.channels)
+                handles = list(self.channel_enabled.keys())
                 feed_list = list(self.feeds.items())
             for handle in handles:
                 if self._feed_stop_event.is_set():
@@ -934,7 +928,6 @@ class StreamPlugin(Plugin):
                 return {"ok": False, "error": "Channel not found — check spelling"}
             with self._lock:
                 self.channel_enabled[handle] = True
-                self.channels = list(self.channel_enabled.keys())
                 self._yt_cache[handle] = []
             self._save_config()
             return {"ok": True, "handle": handle}
@@ -1027,7 +1020,7 @@ class StreamPlugin(Plugin):
         """
 
     def ui_js(self) -> str:
-        return r"""
+        return """
         let stState = {};
 
         function stShowError(msg) {
@@ -1227,7 +1220,7 @@ class StreamPlugin(Plugin):
           container.innerHTML = names.map(function(n) {
             const checked = s.feeds[n].enabled;
             return '<label class="yt-ch-label' + (checked ? ' active' : '') + '" ' +
-              'onclick="stToggleFeed(decodeURIComponent(\'' + encodeURIComponent(n) + '\'), ' + (!checked) + ')">' +
+              'onclick="stToggleFeed(decodeURIComponent(\\'' + encodeURIComponent(n) + '\\'), ' + (!checked) + ')">' +
               stEsc(n).substring(0, 18) + '</label>';
           }).join('');
         }

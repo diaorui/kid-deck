@@ -43,5 +43,4 @@ plugins:
     schedule:
       stop_time: "21:00"          # Clock time auto-stop (like audio_player)
     channel_enabled: {}           # Same shape as yt_cast — copy from there
-    channels: []
     feeds: {}                     # Same shape as podcast_player — copy from there
