@@ -1139,10 +1139,18 @@ class StreamPlugin(Plugin):
           return m + ':' + (s < 10 ? '0' : '') + s;
         }
         function stApplyScroll(row, text) {
+          if (!row) return;
           var el = row.querySelector('.yt-qi-title');
-          if (!el || el.scrollWidth <= el.clientWidth) return;
-          var e2 = stEsc(text);
-          el.innerHTML = '<span class="scroll-wrap" style="--dur:' + Math.max(6, text.length / 6) + 's"><span>' + e2 + '&nbsp;&nbsp;&nbsp;</span><span aria-hidden="true">' + e2 + '&nbsp;&nbsp;&nbsp;</span></span>';
+          if (!el) return;
+          // Measure after layout (innerHTML rebuild can report 0 width too early)
+          requestAnimationFrame(function() {
+            var titleEl = row.querySelector('.yt-qi-title');
+            if (!titleEl) return;
+            if (titleEl.querySelector('.scroll-wrap')) return;
+            if (titleEl.scrollWidth <= titleEl.clientWidth) return;
+            var e2 = stEsc(text);
+            titleEl.innerHTML = '<span class="scroll-wrap" style="--dur:' + Math.max(6, text.length / 6) + 's"><span>' + e2 + '&nbsp;&nbsp;&nbsp;</span><span aria-hidden="true">' + e2 + '&nbsp;&nbsp;&nbsp;</span></span>';
+          });
         }
 
         async function stConnect() {
@@ -1251,11 +1259,12 @@ class StreamPlugin(Plugin):
             return;
           }
           section.style.display = '';
-          var fp = JSON.stringify(s.playlist.map(function(v) { return v.id + '|' + (v.duration || ''); }));
+          // Fingerprint ids only — duration may update after YT resolve and must not rebuild (kills marquee)
+          var fp = JSON.stringify(s.playlist.map(function(v) { return v.id; }));
           var sameData = fp === stQueueFingerprint;
           var sameIdx = idx === stPrevIndex;
           if (sameData && sameIdx) {
-            // still update progress bar only
+            // leave DOM (and scroll-wrap) alone; progress updated below
           } else if (sameData) {
             var oldIdx = stPrevIndex;
             stPrevIndex = idx;
@@ -1271,6 +1280,7 @@ class StreamPlugin(Plugin):
               var titleEl = newRow.querySelector('.yt-qi-title');
               if (titleEl && s.playlist[idx]) titleEl.textContent = s.playlist[idx].title || '';
               stApplyScroll(newRow, s.playlist[idx].title || '');
+              newRow.scrollIntoView({ block: 'nearest' });
             }
           } else {
             stQueueFingerprint = fp;
@@ -1301,18 +1311,23 @@ class StreamPlugin(Plugin):
               }
             }
           }
-          // progress bar on current row (same classes as TV/Podcast)
-          var rows = container.children;
-          for (var ri = 0; ri < rows.length; ri++) {
-            var oldBars = rows[ri].querySelectorAll('.qi-progress');
-            oldBars.forEach(function(el){ el.remove(); });
-          }
-          if (s.status === 'playing' && s.media_duration > 0 && idx >= 0 && rows[idx]) {
-            var pct = Math.min(100, Math.max(0, (s.media_position || 0) / s.media_duration * 100));
-            var bar = document.createElement('div');
-            bar.className = 'qi-progress';
-            bar.innerHTML = '<div class="qi-progress-fill" style="width:' + pct + '%"></div>';
-            rows[idx].appendChild(bar);
+          // Progress: update in place like TV/Podcast (do not rebuild title)
+          var oldBars = container.querySelectorAll('.yt-queue-item:not(.playing) .qi-progress');
+          oldBars.forEach(function(el){ el.remove(); });
+          if (s.status === 'playing' && s.media_duration > 0 && idx >= 0) {
+            var row = container.querySelector('.yt-queue-item.playing') || container.children[idx];
+            if (row) {
+              var pct = Math.min(100, Math.max(0, (s.media_position || 0) / s.media_duration * 100));
+              var fill = row.querySelector('.qi-progress-fill');
+              if (fill) {
+                fill.style.width = pct + '%';
+              } else {
+                var bar = document.createElement('div');
+                bar.className = 'qi-progress';
+                bar.innerHTML = '<div class="qi-progress-fill" style="width:' + pct + '%"></div>';
+                row.appendChild(bar);
+              }
+            }
           }
           var totalSec = 0;
           (s.playlist || []).forEach(function(v){ totalSec += (v.duration || 0); });
