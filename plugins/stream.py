@@ -1569,6 +1569,33 @@ class StreamPlugin(Plugin):
           }).join('');
         }
 
+        document.getElementById('st-queue-list').addEventListener('click', function(e) {
+          var row = e.target.closest('.yt-queue-item');
+          if (!row) return;
+          var idx = Array.prototype.indexOf.call(row.parentNode.children, row);
+          if (row.classList.contains('current')) return;
+          var isSelected = row.classList.toggle('selected');
+          if (isSelected) {
+            for (var i = 0; i < row.parentNode.children.length; i++) {
+              var child = row.parentNode.children[i];
+              if (child !== row && child.classList.contains('selected')) {
+                child.classList.remove('selected');
+                if (stState.playlist && stState.playlist[i]) {
+                  var pt = child.querySelector('.yt-qi-title');
+                  if (pt) pt.textContent = stState.playlist[i].title || '';
+                }
+              }
+            }
+            if (stState.playlist && stState.playlist[idx])
+              stApplyScroll(row, stState.playlist[idx].title || '');
+          } else {
+            if (stState.playlist && stState.playlist[idx]) {
+              var titleEl = row.querySelector('.yt-qi-title');
+              if (titleEl) titleEl.textContent = stState.playlist[idx].title || '';
+            }
+          }
+        });
+
         async function stPoll() {
           try {
             const r = await fetch('/api/stream/status');
