@@ -271,6 +271,8 @@ class PodcastPlugin(Plugin):
                     info = self.feeds.get(feed_name)
                 if info is None:
                     continue
+                if not info.get("enabled", True):
+                    continue
                 try:
                     episodes = _fetch_feed(feed_name, info["url"])
                     for ep in episodes:

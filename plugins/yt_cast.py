@@ -130,6 +130,8 @@ class YTCastPlugin(Plugin):
             for handle in handles:
                 if self._feed_stop_event.is_set():
                     return
+                if not self.channel_enabled.get(handle, True):
+                    continue
                 try:
                     videos = _fetch_channel_videos(handle, self._ydl)
                     with self._lock:
