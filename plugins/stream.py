@@ -1365,11 +1365,24 @@ class StreamPlugin(Plugin):
         }
         async function stPlay() {
           stHideError();
+          const btn = document.getElementById('st-play-btn');
+          const origHTML = btn.innerHTML;
+          btn.disabled = true;
+          btn.innerHTML = 'Starting\u2026';
+          var statusEl = document.getElementById('st-status');
           if (stState.status === 'disconnected') {
+            statusEl.textContent = 'Connecting\u2026';
             const r = await stFetch('/api/stream/connect');
-            if (!r || !r.ok) { stShowError(r ? r.error : 'Connect failed'); return; }
+            if (!r || !r.ok) {
+              btn.disabled = false; btn.innerHTML = origHTML;
+              statusEl.textContent = 'Disconnected';
+              stShowError(r ? r.error : 'Connect failed');
+              return;
+            }
           }
+          statusEl.textContent = 'Starting Stream\u2026';
           const r2 = await stFetch('/api/stream/play');
+          btn.disabled = false; btn.innerHTML = origHTML;
           if (!r2 || !r2.ok) stShowError(r2 ? r2.error : 'Play failed');
         }
         async function stStop() {
