@@ -1471,7 +1471,9 @@ class StreamPlugin(Plugin):
           var sameData = fp === stQueueFingerprint;
           var sameIdx = idx === stPrevIndex;
           if (sameData && sameIdx) {
-            // leave DOM (and scroll-wrap) alone; progress updated below
+            // Try scroll again — section may have been hidden on first render
+            var cr = idx >= 0 && idx < container.children.length ? container.children[idx] : null;
+            if (cr && s.playlist[idx]) stApplyScroll(cr, s.playlist[idx].title || '');
           } else if (sameData) {
             var oldIdx = stPrevIndex;
             stPrevIndex = idx;
