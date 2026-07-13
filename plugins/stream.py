@@ -1,11 +1,14 @@
+import json
 import os
 import re
+import subprocess
 import threading
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, time as dtime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import pychromecast
 import requests
@@ -149,6 +152,45 @@ def _validate_feed(url: str) -> dict:
 
 
 ITUNES_NS = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
+TARGET_LOUDNESS = -16.0
+
+
+def _measure_loudness(url: str) -> float:
+    """Analyze first 60s of audio with ffmpeg loudnorm, return gain_db to hit TARGET_LOUDNESS.
+    Returns 0.0 on failure (safe fallback: no adjustment)."""
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-i", url, "-t", "60",
+                "-af", "loudnorm=I=-16:print_format=json",
+                "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        stderr = proc.stderr
+        start = stderr.find("{")
+        if start == -1:
+            return 0.0
+        json_str = stderr[start:]
+        depth = 0
+        end = -1
+        for i, c in enumerate(json_str):
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end == -1:
+            return 0.0
+        data = json.loads(json_str[:end])
+        input_i = float(data.get("input_i", 0))
+        gain_db = TARGET_LOUDNESS - input_i
+        return max(-15.0, min(15.0, gain_db))
+    except Exception as e:
+        print(f"loudness measurement failed: {e}", flush=True)
+        return 0.0
 
 
 def _fetch_feed(feed_name: str, feed_url: str, keep: int) -> list[dict]:
@@ -197,10 +239,6 @@ def _fetch_feed(feed_name: str, feed_url: str, keep: int) -> list[dict]:
     return result
 
 
-def _item_id(item: dict) -> str:
-    return item.get("id") or ""
-
-
 def _normalize_video(v: dict) -> dict:
     vid = v.get("video_id") or ""
     return {
@@ -227,6 +265,7 @@ def _normalize_audio(e: dict) -> dict:
         "source": e.get("feed_name") or "",
         "play_url": url,
         "link": e.get("link") or "",
+        "gain_db": e.get("gain_db", 0.0),
     }
 
 
@@ -304,7 +343,6 @@ class StreamPlugin(Plugin):
         self.current_index = -1
         self.total_played_sec: float = 0.0
         self.screen_played_sec: float = 0.0
-        self.played_ids: set[str] = set()
 
         self._cast: pychromecast.Chromecast | None = None
         self._browser: pychromecast.discovery.CastBrowser | None = None
@@ -394,11 +432,11 @@ class StreamPlugin(Plugin):
 
     def _build_preview_playlist(self) -> list[dict]:
         """Live preview from latest cache (as if starting a fresh session). Does not mutate play state."""
-        v_pool, a_pool = self._build_pools(exclude_ids=set())
+        v_pool, a_pool = self._build_pools()
         return plan_playlist(v_pool, a_pool, 0.0, 0.0, self._ratio())
 
-    def _build_pools(self, exclude_ids: set[str] | None = None) -> tuple[list[dict], list[dict]]:
-        exclude_ids = exclude_ids or set()
+    def _build_pools(self) -> tuple[list[dict], list[dict]]:
+        """Newest-first pools sized by horizon budgets. No play-history dedup."""
         max_v = self.max_video_minutes * 60
         max_a = self.max_audio_minutes * 60
         v_budget = self._video_budget_sec()
@@ -414,11 +452,8 @@ class StreamPlugin(Plugin):
                     continue
                 if item["duration"] <= 0 or item["duration"] > max_v:
                     continue
-                if item["id"] in exclude_ids:
-                    continue
                 videos.append(item)
         videos.sort(key=lambda x: x["published"], reverse=True)
-        # stable unique by id
         seen: set[str] = set()
         uniq_v: list[dict] = []
         for it in videos:
@@ -436,8 +471,6 @@ class StreamPlugin(Plugin):
                 if not item["play_url"]:
                     continue
                 if item["duration"] <= 0 or item["duration"] > max_a:
-                    continue
-                if item["id"] in exclude_ids:
                     continue
                 audios.append(item)
         audios.sort(key=lambda x: x["published"], reverse=True)
@@ -467,17 +500,11 @@ class StreamPlugin(Plugin):
 
         return video_pool, audio_pool
 
-    def _replan_locked(self, allow_replay: bool = False) -> bool:
+    def _replan_locked(self) -> bool:
         """Rebuild playlist from latest cache. Caller holds lock.
-        Returns True if playlist non-empty after replan.
+        Continues eye-protection ratio from screen_played/total_played.
         """
-        exclude = set() if allow_replay else set(self.played_ids)
-        v_pool, a_pool = self._build_pools(exclude_ids=exclude)
-        if not v_pool and not a_pool and not allow_replay and self.played_ids:
-            # loop: allow replaying already-played items
-            self.played_ids.clear()
-            v_pool, a_pool = self._build_pools(exclude_ids=set())
-
+        v_pool, a_pool = self._build_pools()
         planned = plan_playlist(
             v_pool,
             a_pool,
@@ -496,15 +523,13 @@ class StreamPlugin(Plugin):
         return bool(planned)
 
     def _ensure_mixed_playlist_locked(self) -> bool:
-        """Ensure we have something to play; replan from latest cache when a kind runs out.
+        """Ensure we have something to play; replan when list ends or one kind runs out.
 
-        If remaining playlist is empty, or remaining is missing video/audio while the
-        latest cache can still supply that kind, rebuild so we do not stream only one type.
+        If remaining is missing video or audio while cache still has that kind, rebuild
+        so we do not stream only one type for a long tail.
         """
         if self.current_index < 0 or self.current_index >= len(self.playlist):
-            return self._replan_locked(allow_replay=False) or self._replan_locked(
-                allow_replay=True
-            )
+            return self._replan_locked()
 
         rest = self.playlist[self.current_index :]
         has_v = any(x.get("kind") == "video" for x in rest)
@@ -512,18 +537,13 @@ class StreamPlugin(Plugin):
         if has_v and has_a:
             return True
 
-        # Latest cache (excluding played): can we supply the missing kind?
-        v_pool, a_pool = self._build_pools(exclude_ids=self.played_ids)
+        v_pool, a_pool = self._build_pools()
         need_replan = (not has_v and len(v_pool) > 0) or (not has_a and len(a_pool) > 0)
         if not need_replan and (v_pool or a_pool) and not rest:
             need_replan = True
         if need_replan:
-            ok = self._replan_locked(allow_replay=False)
-            if not ok:
-                ok = self._replan_locked(allow_replay=True)
-            return ok
+            return self._replan_locked()
 
-        # Mono-type remaining and cache cannot fill the other kind — play what we have
         return bool(rest)
 
     def _yt_feed_loop(self):
@@ -560,6 +580,11 @@ class StreamPlugin(Plugin):
                     episodes = _fetch_feed(
                         feed_name, info["url"], self.podcast_keep_per_feed
                     )
+                    for ep in episodes:
+                        if ep.get("duration", 0) >= 60:
+                            ep["gain_db"] = _measure_loudness(ep["url"])
+                        else:
+                            ep["gain_db"] = 0.0
                     with self._lock:
                         self._pc_cache[feed_name] = episodes
                 except Exception as e:
@@ -593,9 +618,6 @@ class StreamPlugin(Plugin):
         self.total_played_sec += played
         if item.get("kind") == "video":
             self.screen_played_sec += played
-        iid = _item_id(item)
-        if iid:
-            self.played_ids.add(iid)
         self._play_start = 0
 
     def _play_current(self) -> str | None:
@@ -645,6 +667,16 @@ class StreamPlugin(Plugin):
                     url = item.get("play_url") or ""
                     if not url:
                         raise RuntimeError("missing audio url")
+                    gain_db = item.get("gain_db", 0.0)
+                    if gain_db != 0.0:
+                        server = self.controller.config.get("server", {})
+                        host = server.get("host", "0.0.0.0")
+                        port = server.get("port", 8080)
+                        if host and host != "0.0.0.0":
+                            url = (
+                                f"http://{host}:{port}/api/stream/audio_proxy"
+                                f"?url={quote(url)}&gain_db={gain_db}"
+                            )
                     mc = cast.media_controller
                     mc.play_media(url, "audio/mpeg")
                     with self._lock:
@@ -662,9 +694,6 @@ class StreamPlugin(Plugin):
                     flush=True,
                 )
                 with self._lock:
-                    iid = _item_id(item)
-                    if iid:
-                        self.played_ids.add(iid)
                     self.current_index += 1
         with self._lock:
             self.status = "connected_idle"
@@ -858,7 +887,6 @@ class StreamPlugin(Plugin):
         self.playlist = []
         self.total_played_sec = 0.0
         self.screen_played_sec = 0.0
-        self.played_ids.clear()
         self._outro_playing = False
         try:
             if self._cast:
@@ -984,10 +1012,8 @@ class StreamPlugin(Plugin):
                     return {"ok": False, "error": "already playing"}
                 self.total_played_sec = 0.0
                 self.screen_played_sec = 0.0
-                self.played_ids.clear()
-                if not self._replan_locked(allow_replay=False):
-                    if not self._replan_locked(allow_replay=True):
-                        return {"ok": False, "error": "playlist empty, try again later"}
+                if not self._replan_locked():
+                    return {"ok": False, "error": "playlist empty, try again later"}
                 if self._thread is None or not self._thread.is_alive():
                     self._stop_event.clear()
                     self._thread = threading.Thread(
@@ -1166,6 +1192,32 @@ class StreamPlugin(Plugin):
                 self._pc_cache[feed_title] = []
             self._save_config()
             return {"ok": True, "feed_name": feed_title}
+
+        @self.router.get("/audio_proxy")
+        async def audio_proxy(url: str, gain_db: float = 0.0):
+            from fastapi.responses import StreamingResponse
+
+            def _proxy():
+                proc = subprocess.Popen(
+                    [
+                        "ffmpeg", "-i", url,
+                        "-af", f"volume={gain_db}dB",
+                        "-f", "mp3", "-",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                try:
+                    while True:
+                        chunk = proc.stdout.read(65536)
+                        if not chunk:
+                            break
+                        yield chunk
+                finally:
+                    proc.kill()
+                    proc.wait()
+
+            return StreamingResponse(_proxy(), media_type="audio/mpeg")
 
         app.include_router(self.router)
 

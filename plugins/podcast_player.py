@@ -1,9 +1,12 @@
+import json
+import subprocess
 import threading
 import time
 import xml.etree.ElementTree as ET
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import pychromecast
 import requests
@@ -90,6 +93,45 @@ def _validate_feed(url: str) -> dict:
 
 
 ITUNES_NS = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
+TARGET_LOUDNESS = -16.0
+
+
+def _measure_loudness(url: str) -> float:
+    """Analyze first 60s of audio with ffmpeg loudnorm, return gain_db to hit TARGET_LOUDNESS.
+    Returns 0.0 on failure (safe fallback: no adjustment)."""
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-i", url, "-t", "60",
+                "-af", "loudnorm=I=-16:print_format=json",
+                "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        stderr = proc.stderr
+        start = stderr.find("{")
+        if start == -1:
+            return 0.0
+        json_str = stderr[start:]
+        depth = 0
+        end = -1
+        for i, c in enumerate(json_str):
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end == -1:
+            return 0.0
+        data = json.loads(json_str[:end])
+        input_i = float(data.get("input_i", 0))
+        gain_db = TARGET_LOUDNESS - input_i
+        return max(-15.0, min(15.0, gain_db))
+    except Exception as e:
+        print(f"loudness measurement failed: {e}", flush=True)
+        return 0.0
 
 
 def _fetch_feed(feed_name: str, feed_url: str) -> list[dict]:
@@ -184,6 +226,16 @@ class PodcastPlugin(Plugin):
                 episode = self.queue[self.current_index]
                 title = episode["title"]
                 mp3_url = episode["url"]
+                gain_db = episode.get("gain_db", 0.0)
+            if gain_db != 0.0:
+                server = self.controller.config.get("server", {})
+                host = server.get("host", "0.0.0.0")
+                port = server.get("port", 8080)
+                if host and host != "0.0.0.0":
+                    mp3_url = (
+                        f"http://{host}:{port}/api/podcast_player/audio_proxy"
+                        f"?url={quote(mp3_url)}&gain_db={gain_db}"
+                    )
             try:
                 mc = self._cast.media_controller
                 mc.play_media(mp3_url, "audio/mpeg")
@@ -221,6 +273,11 @@ class PodcastPlugin(Plugin):
                     continue
                 try:
                     episodes = _fetch_feed(feed_name, info["url"])
+                    for ep in episodes:
+                        if ep.get("duration", 0) >= 60:
+                            ep["gain_db"] = _measure_loudness(ep["url"])
+                        else:
+                            ep["gain_db"] = 0.0
                     with self._lock:
                         self._feed_cache[feed_name] = episodes
                 except Exception as e:
@@ -388,6 +445,11 @@ class PodcastPlugin(Plugin):
                 for feed_name, info in self.feeds.items():
                     try:
                         episodes = _fetch_feed(feed_name, info["url"])
+                        for ep in episodes:
+                            if ep.get("duration", 0) >= 60:
+                                ep["gain_db"] = _measure_loudness(ep["url"])
+                            else:
+                                ep["gain_db"] = 0.0
                         with self._lock:
                             self._feed_cache[feed_name] = episodes
                     except Exception as e:
@@ -523,6 +585,32 @@ class PodcastPlugin(Plugin):
                 self._feed_cache[feed_title] = []
             self._save_config()
             return {"ok": True, "feed_name": feed_title}
+
+        @self.router.get("/audio_proxy")
+        async def audio_proxy(url: str, gain_db: float = 0.0):
+            from fastapi.responses import StreamingResponse
+
+            def _proxy():
+                proc = subprocess.Popen(
+                    [
+                        "ffmpeg", "-i", url,
+                        "-af", f"volume={gain_db}dB",
+                        "-f", "mp3", "-",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                try:
+                    while True:
+                        chunk = proc.stdout.read(65536)
+                        if not chunk:
+                            break
+                        yield chunk
+                finally:
+                    proc.kill()
+                    proc.wait()
+
+            return StreamingResponse(_proxy(), media_type="audio/mpeg")
 
         app.include_router(self.router)
 

@@ -84,6 +84,7 @@ def main():
     cfg = load_config(config_path)
 
     controller = Controller()
+    controller.config = cfg
 
     camera_cfg = cfg.get("camera", {})
     controller.camera = CameraClient(camera_cfg)
