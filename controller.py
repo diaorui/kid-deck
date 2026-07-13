@@ -103,8 +103,9 @@ def main():
         ap.build_cache()
 
     for plugin in controller.plugins:
-        plugin.register_routes(app)
-        plugin.start()
+        if not plugin.config.get("disabled"):
+            plugin.register_routes(app)
+            plugin.start()
 
     ap = controller.get_plugin("audio_player")
     alarm_plugin = controller.get_plugin("alarm")

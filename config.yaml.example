@@ -26,9 +26,11 @@ plugins:
       stop_time: "23:00"
 
   podcast_player:
+    disabled: false          # Set true to hide tab + stop background threads
     feeds: {}                # Podcast RSS feeds, e.g. "My feed": {url: "https://example.com/feed.xml", enabled: true}
 
   yt_cast:
+    disabled: false          # Set true to hide tab + stop background threads
     channel_enabled: {}      # YouTube channel handles + enabled state, e.g. "@channelname": true
     uncast_duration: 40      # Auto-stop after N minutes (0 = no auto-stop)
 

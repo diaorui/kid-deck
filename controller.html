@@ -335,7 +335,7 @@
 </header>
 
 <nav class="tabs" id="tabs">
-  {% for plugin in plugins %}
+  {% for plugin in plugins if not plugin.config.get("disabled") %}
   <button class="tab-btn {% if loop.first %}active{% endif %}" data-tab="plugin-{{ plugin.name }}">
     {{ plugin.icon }} {{ plugin.title }}
   </button>
@@ -343,7 +343,7 @@
 </nav>
 
 <main>
-  {% for plugin in plugins %}
+  {% for plugin in plugins if not plugin.config.get("disabled") %}
   {{ plugin.ui_section() | safe }}
   {% endfor %}
 </main>
@@ -406,7 +406,7 @@ function confirmRestart() {
 }
 </script>
 
-{% for plugin in plugins %}
+{% for plugin in plugins if not plugin.config.get("disabled") %}
 <script>{{ plugin.ui_js() | safe }}</script>
 {% endfor %}
 
