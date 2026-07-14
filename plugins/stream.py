@@ -1263,7 +1263,11 @@ class StreamPlugin(Plugin):
 
             proc = subprocess.Popen(
                 [
-                    "ffmpeg", "-i", url,
+                    "ffmpeg",
+                    "-fflags", "+nobuffer",
+                    "-probesize", "200000",
+                    "-analyzeduration", "500000",
+                    "-i", url,
                     "-af", f"volume={gain_db}dB",
                     "-f", "mp3", "-",
                 ],
