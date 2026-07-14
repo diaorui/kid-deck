@@ -931,7 +931,6 @@ class StreamPlugin(Plugin):
         self._cast = None
         self.status = "disconnected"
         self.device_name = ""
-        self._browser = None
 
     def start(self):
         super().start()

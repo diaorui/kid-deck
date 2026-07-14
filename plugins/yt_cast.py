@@ -285,7 +285,6 @@ class YTCastPlugin(Plugin):
         self._cast = None
         self.status = "disconnected"
         self.device_name = ""
-        self._browser = None
 
     def _do_disconnect(self):
         self._do_stop()
