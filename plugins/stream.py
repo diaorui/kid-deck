@@ -702,7 +702,7 @@ class StreamPlugin(Plugin):
                     if not url:
                         raise RuntimeError("missing audio url")
                     gain_db = item.get("gain_db", 0.0)
-                    if gain_db != 0.0:
+                    if abs(gain_db) > 1.5:
                         local_ip = _local_ip()
                         if not local_ip:
                             raise RuntimeError("cannot apply gain_db: no LAN IP detected")
