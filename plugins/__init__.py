@@ -1,3 +1,4 @@
+import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ class Plugin(ABC):
     def __init__(self, controller: Any, config: dict):
         self.controller = controller
         self.config = config
+        self.log = logging.getLogger(f"plugin.{self.name}")
         self.router = APIRouter(prefix=f"/api/{self.name}")
         self.running = False
 

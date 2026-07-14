@@ -1,8 +1,10 @@
 import importlib.util
 import inspect
+import logging
 import os
 import sys
 from collections import defaultdict
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import uvicorn
@@ -15,24 +17,51 @@ from camera_client import CameraClient, check_deps
 from plugins import Plugin
 
 
+def setup_logging(cfg: dict):
+    log_cfg = cfg.get("logging", {})
+    log_path = Path(__file__).parent / (log_cfg.get("file", "app.log"))
+    max_bytes = log_cfg.get("max_bytes", 5 * 1024 * 1024)
+    backup_count = log_cfg.get("backup_count", 2)
+    level = getattr(logging, (log_cfg.get("level", "DEBUG")).upper(), logging.DEBUG)
+
+    fh = RotatingFileHandler(log_path, maxBytes=max_bytes, backupCount=backup_count)
+    fh.setLevel(level)
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)-7s] [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(logging.Formatter("[%(name)s] %(message)s"))
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    root.addHandler(fh)
+    root.addHandler(ch)
+    return logging.getLogger("controller")
+
+
 def load_config(path: str) -> dict:
     p = Path(path)
     if not p.exists():
-        print(f"Config not found: {p}")
+        log = logging.getLogger("controller")
+        log.error("Config not found: %s", p)
         example = p.with_suffix(".yaml.example")
         if example.exists():
-            print(f"Copy {example.name} to {p.name} and edit with your settings:")
-            print(f"  cp {example.name} {p.name}")
+            log.info("Copy %s to %s and edit with your settings", example.name, p.name)
         sys.exit(1)
     with open(p) as f:
         cfg = yaml.safe_load(f)
     if cfg is None:
-        print(f"Empty config: {p}")
+        log = logging.getLogger("controller")
+        log.error("Empty config: %s", p)
         sys.exit(1)
     return cfg
 
 
 def discover_plugins(controller, plugins_config: dict) -> list[Plugin]:
+    log = logging.getLogger("controller")
     plugin_dir = Path(__file__).parent / "plugins"
     found = []
 
@@ -53,7 +82,7 @@ def discover_plugins(controller, plugins_config: dict) -> list[Plugin]:
                 plugin_config = plugins_config.get(obj.name, {})
                 plugin = obj(controller, plugin_config)
                 found.append(plugin)
-                print(f"Loaded plugin: {obj.name} ({obj.title})")
+                log.info("Loaded plugin: %s (%s)", obj.name, obj.title)
                 break
 
     found.sort(key=lambda p: p.order)
@@ -82,6 +111,8 @@ def main():
     check_deps()
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
     cfg = load_config(config_path)
+
+    log = setup_logging(cfg)
 
     controller = Controller()
     controller.config = cfg
@@ -112,7 +143,7 @@ def main():
     if ap and alarm_plugin:
         controller.on("alarm:triggered", lambda: ap.pause())
         controller.on("alarm:finished", lambda: ap.resume())
-        print("Wired: alarm → audio player pause/resume")
+        log.info("Wired: alarm → audio player pause/resume")
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
@@ -139,14 +170,14 @@ def main():
     host = server_cfg.get("host", "0.0.0.0")
     port = server_cfg.get("port", 8080)
 
-    print(f"Controller starting on http://{host}:{port}")
+    log.info("Controller starting on http://%s:%s", host, port)
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 async def _do_restart(controller: Controller):
     import asyncio
     await asyncio.sleep(0.3)
-    print("Restarting controller...", flush=True)
+    logging.getLogger("controller").info("Restarting controller...")
     for plugin in controller.plugins:
         plugin.stop()
     controller.camera.close()

@@ -38,14 +38,14 @@ class AlarmPlugin(Plugin):
         super().start()
         self._thread = threading.Thread(target=self._scheduler_loop, daemon=True)
         self._thread.start()
-        print("Alarm: started")
+        self.log.info("started")
 
     def stop(self):
         self.running = False
         if self._thread:
             self._thread.join(timeout=5)
         super().stop()
-        print("Alarm: stopped")
+        self.log.info("stopped")
 
     def _scheduler_loop(self):
         while self.running:
@@ -76,11 +76,11 @@ class AlarmPlugin(Plugin):
     def _trigger_alarm(self, alarm: dict):
         audio_path = alarm.get("audio", "")
         if not audio_path or not Path(audio_path).exists():
-            print(f"Alarm '{alarm['id']}': audio file not found: {audio_path}", flush=True)
+            self.log.warning("'%s': audio file not found: %s", alarm['id'], audio_path)
             return
 
         self._triggered_today.add(alarm["id"])
-        print(f"Alarm '{alarm['id']}' triggered at {alarm['time']}", flush=True)
+        self.log.info("'%s' triggered at %s", alarm['id'], alarm['time'])
 
         self.controller.emit("alarm:triggered", alarm_id=alarm["id"])
 
@@ -90,7 +90,7 @@ class AlarmPlugin(Plugin):
             camera.play_pcm(pcm, rate=self._rate, volume=self.volume)
 
         self.controller.emit("alarm:finished", alarm_id=alarm["id"])
-        print(f"Alarm '{alarm['id']}' finished", flush=True)
+        self.log.info("'%s' finished", alarm['id'])
 
     def _get_pcm(self, audio_path: str) -> bytes | None:
         with self._pcm_lock:
@@ -101,10 +101,10 @@ class AlarmPlugin(Plugin):
             pcm = convert_to_pcm(audio_path, self._rate)
             with self._pcm_lock:
                 self._pcm_cache[audio_path] = pcm
-            print(f"Alarm: cached PCM for {audio_path}", flush=True)
+            self.log.info("cached PCM for %s", audio_path)
             return pcm
         except (RuntimeError, FileNotFoundError) as e:
-            print(f"Alarm: failed to convert {audio_path}: {e}", flush=True)
+            self.log.warning("failed to convert %s: %s", audio_path, e)
             return None
 
     def register_routes(self, app):
@@ -188,7 +188,7 @@ class AlarmPlugin(Plugin):
             with open(path, "w") as f:
                 yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
         except Exception as e:
-            print(f"Alarm: failed to save config: {e}", flush=True)
+            self.log.error("failed to save config: %s", e)
 
     def ui_section(self) -> str:
         return """

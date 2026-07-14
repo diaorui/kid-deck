@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import threading
@@ -12,9 +13,10 @@ if deno not in os.environ.get('PATH', ''):
     os.environ['PATH'] = deno + ':' + os.environ.get('PATH', '')
 
 if not os.path.isfile(os.path.expanduser('~/.deno/bin/deno')):
-    print("WARNING: deno JS runtime not found at ~/.deno/bin/deno", flush=True)
-    print("  YouTube video extraction may fail for some videos.", flush=True)
-    print("  Install: curl -fsSL https://deno.land/install.sh | sh", flush=True)
+    log = logging.getLogger("plugin.yt_cast")
+    log.warning("deno JS runtime not found at ~/.deno/bin/deno")
+    log.warning("YouTube video extraction may fail for some videos")
+    log.warning("Install: curl -fsSL https://deno.land/install.sh | sh")
 
 import yt_dlp
 
@@ -137,7 +139,7 @@ class YTCastPlugin(Plugin):
                     with self._lock:
                         self._feed_cache[handle] = videos
                 except Exception as e:
-                    print(f"YT Cast feed: failed to fetch {handle}: {e}", flush=True)
+                    self.log.warning("feed: failed to fetch %s: %s", handle, e)
                 delay = 0.5 if first_pass else self.feed_interval
                 self._feed_stop_event.wait(delay)
             first_pass = False
@@ -146,7 +148,7 @@ class YTCastPlugin(Plugin):
         try:
             chromecasts, browser = pychromecast.get_chromecasts()
         except Exception as e:
-            print(f"YT Cast: discovery error: {e}", flush=True)
+            self.log.warning("discovery error: %s", e)
             return None
         self._browser = browser
         if chromecasts:
@@ -154,7 +156,7 @@ class YTCastPlugin(Plugin):
             try:
                 cc.wait(timeout=10)
             except Exception as e:
-                print(f"YT Cast: device wait error: {e}", flush=True)
+                self.log.warning("device wait error: %s", e)
             return cc
         return None
 
@@ -180,10 +182,10 @@ class YTCastPlugin(Plugin):
                 mc.play_media(url, 'video/mp4')
                 self._play_start = time.time()
                 self._media_duration_local = dur
-                print(f"YT Cast: playing [{self.current_index + 1}/{len(self.queue)}] {title}", flush=True)
+                self.log.info("playing [%d/%d] %s", self.current_index + 1, len(self.queue), title)
                 return None
             except Exception as e:
-                print(f"YT Cast: skipping unavailable {title}: {e}", flush=True)
+                self.log.warning("skipping unavailable %s: %s", title, e)
                 with self._lock:
                     self.current_index += 1
         with self._lock:
@@ -205,10 +207,11 @@ class YTCastPlugin(Plugin):
             with open(path, "w") as f:
                 yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
         except Exception as e:
-            print(f"YT Cast: failed to save config: {e}", flush=True)
+            self.log.error("failed to save config: %s", e)
 
     def _monitor_loop(self):
         prev_state = "UNKNOWN"
+        prev_reason = None
         prev_content = None
 
         while not self._stop_event.is_set():
@@ -224,7 +227,7 @@ class YTCastPlugin(Plugin):
                         if self.uncast_duration > 0 and self.cast_start_time > 0:
                             elapsed = now - self.cast_start_time
                             if elapsed >= self.uncast_duration * 60:
-                                print(f"YT Cast: auto-uncast after {self.uncast_duration}m", flush=True)
+                                self.log.info("auto-uncast after %dm", self.uncast_duration)
                                 self._do_stop()
                                 self._stop_event.wait(2)
                                 continue
@@ -243,17 +246,23 @@ class YTCastPlugin(Plugin):
                             if next_idx < len(self.queue):
                                 self.current_index = next_idx
                                 should_play_next = True
+                                self.log.info("advance: state=%s prev=%s reason=%s",
+                                               state, prev_state, idle_reason)
                             else:
-                                print("YT Cast: queue exhausted", flush=True)
+                                self.log.info("queue exhausted")
                                 self._do_stop()
 
                 if should_play_next:
                     self._play_next()
+                elif state != prev_state or idle_reason != prev_reason:
+                    self.log.debug("monitor: state=%s prev=%s reason=%s",
+                                    state, prev_state, idle_reason)
 
                 prev_state = state
+                prev_reason = idle_reason
                 prev_content = content_id
             except Exception as e:
-                print(f"YT Cast monitor error: {e}", flush=True)
+                self.log.exception("monitor error")
 
             self._stop_event.wait(2)
 
@@ -291,7 +300,7 @@ class YTCastPlugin(Plugin):
         self._feed_stop_event.clear()
         self._feed_thread = threading.Thread(target=self._feed_fetch_loop, daemon=True)
         self._feed_thread.start()
-        print("YT Cast: ready")
+        self.log.info("ready")
 
     def stop(self):
         self._stop_event.set()
@@ -302,7 +311,7 @@ class YTCastPlugin(Plugin):
             self._feed_thread.join(timeout=5)
         self._do_disconnect()
         super().stop()
-        print("YT Cast: stopped")
+        self.log.info("stopped")
 
     def register_routes(self, app):
         from fastapi import Request
@@ -374,7 +383,7 @@ class YTCastPlugin(Plugin):
                         with self._lock:
                             self._feed_cache[handle] = videos
                     except Exception as e:
-                        print(f"YT Cast: refresh failed for {handle}: {e}", flush=True)
+                        self.log.warning("refresh failed for %s: %s", handle, e)
 
             await loop.run_in_executor(None, _do_refresh)
             with self._lock:

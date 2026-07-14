@@ -1,4 +1,5 @@
 import json
+import logging
 import subprocess
 import threading
 import time
@@ -130,7 +131,7 @@ def _measure_loudness(url: str) -> float:
         gain_db = TARGET_LOUDNESS - input_i
         return max(-15.0, min(15.0, gain_db))
     except Exception as e:
-        print(f"loudness measurement failed: {e}", flush=True)
+        logging.getLogger("plugin.podcast_player").warning("loudness measurement failed: %s", e)
         return 0.0
 
 
@@ -204,7 +205,7 @@ class PodcastPlugin(Plugin):
         try:
             chromecasts, browser = pychromecast.get_chromecasts()
         except Exception as e:
-            print(f"Podcast: discovery error: {e}", flush=True)
+            self.log.warning("discovery error: %s", e)
             return None
         self._browser = browser
         if chromecasts:
@@ -212,7 +213,7 @@ class PodcastPlugin(Plugin):
             try:
                 cc.wait(timeout=10)
             except Exception as e:
-                print(f"Podcast: device wait error: {e}", flush=True)
+                self.log.warning("device wait error: %s", e)
             return cc
         return None
 
@@ -241,10 +242,10 @@ class PodcastPlugin(Plugin):
                 mc.play_media(mp3_url, "audio/mpeg")
                 self._play_start = time.time()
                 self._media_duration_local = episode.get("duration", 0)
-                print(f"Podcast: playing [{self.current_index + 1}/{len(self.queue)}] {title}", flush=True)
+                self.log.info("playing [%d/%d] %s", self.current_index + 1, len(self.queue), title)
                 return None
             except Exception as e:
-                print(f"Podcast: skipping unavailable {title}: {e}", flush=True)
+                self.log.warning("skipping unavailable %s: %s", title, e)
                 with self._lock:
                     self.current_index += 1
         with self._lock:
@@ -283,7 +284,7 @@ class PodcastPlugin(Plugin):
                     with self._lock:
                         self._feed_cache[feed_name] = episodes
                 except Exception as e:
-                    print(f"Podcast feed: failed to fetch {feed_name}: {e}", flush=True)
+                    self.log.warning("feed: failed to fetch %s: %s", feed_name, e)
                 delay = 0.5 if first_pass else self.feed_interval
                 self._feed_stop_event.wait(delay)
             first_pass = False
@@ -302,10 +303,11 @@ class PodcastPlugin(Plugin):
             with open(path, "w") as f:
                 yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
         except Exception as e:
-            print(f"Podcast: failed to save config: {e}", flush=True)
+            self.log.error("failed to save config: %s", e)
 
     def _monitor_loop(self):
         prev_state = "UNKNOWN"
+        prev_reason = None
 
         while not self._stop_event.is_set():
             try:
@@ -327,16 +329,22 @@ class PodcastPlugin(Plugin):
                             if next_idx < len(self.queue):
                                 self.current_index = next_idx
                                 should_play_next = True
+                                self.log.info("advance: state=%s prev=%s reason=%s",
+                                               state, prev_state, idle_reason)
                             else:
-                                print("Podcast: queue exhausted", flush=True)
+                                self.log.info("queue exhausted")
                                 self._do_stop()
 
                 if should_play_next:
                     self._play_next()
+                elif state != prev_state or idle_reason != prev_reason:
+                    self.log.debug("monitor: state=%s prev=%s reason=%s",
+                                    state, prev_state, idle_reason)
 
                 prev_state = state
+                prev_reason = idle_reason
             except Exception as e:
-                print(f"Podcast monitor error: {e}", flush=True)
+                self.log.exception("monitor error")
 
             self._stop_event.wait(2)
 
@@ -373,7 +381,7 @@ class PodcastPlugin(Plugin):
         self._feed_stop_event.clear()
         self._feed_thread = threading.Thread(target=self._feed_fetch_loop, daemon=True)
         self._feed_thread.start()
-        print("Podcast: ready")
+        self.log.info("ready")
 
     def stop(self):
         self._stop_event.set()
@@ -384,7 +392,7 @@ class PodcastPlugin(Plugin):
             self._feed_thread.join(timeout=5)
         self._do_disconnect()
         super().stop()
-        print("Podcast: stopped")
+        self.log.info("stopped")
 
     def register_routes(self, app):
         from fastapi import Request
@@ -455,7 +463,7 @@ class PodcastPlugin(Plugin):
                         with self._lock:
                             self._feed_cache[feed_name] = episodes
                     except Exception as e:
-                        print(f"Podcast: refresh failed for {feed_name}: {e}", flush=True)
+                        self.log.warning("refresh failed for %s: %s", feed_name, e)
 
             await loop.run_in_executor(None, _do_refresh)
             with self._lock:

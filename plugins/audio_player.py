@@ -85,7 +85,7 @@ class AudioPlayerPlugin(Plugin):
             with open(path, "w") as f:
                 yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
         except Exception as e:
-            print(f"Audio player: failed to save config: {e}", flush=True)
+            self.log.error("failed to save config: %s", e)
 
     def scan_files(self):
         patterns = ["*.mp3", "*.MP3", "*.wav", "*.WAV"]
@@ -119,10 +119,10 @@ class AudioPlayerPlugin(Plugin):
         self.series_order = list(self.audio_files_by_series.keys())
         parts = ", ".join(f"{k}={len(v)}" for k, v in self.audio_files_by_series.items())
         total = sum(len(v) for v in self.audio_files_by_series.values())
-        print(f"Audio player: found files — {parts}, total={total}")
+        self.log.info("found files — %s, total=%d", parts, total)
 
     def build_cache(self):
-        print("Audio player: building PCM cache...")
+        self.log.info("building PCM cache...")
         self.pcm_cache = {}
         for series_name, files in self.audio_files_by_series.items():
             for fp in files:
@@ -135,7 +135,7 @@ class AudioPlayerPlugin(Plugin):
                 try:
                     pcm = convert_to_pcm(str(fp), self.rate)
                 except (RuntimeError, FileNotFoundError) as e:
-                    print(f"  SKIP {fp.name}: {e}", flush=True)
+                    self.log.warning("SKIP %s: %s", fp.name, e)
                     continue
                 cache_path.write_bytes(pcm)
                 self.pcm_cache[fp] = pcm
@@ -144,7 +144,7 @@ class AudioPlayerPlugin(Plugin):
             raise RuntimeError("No audio files could be converted")
 
         total_dur = sum(len(p) for p in self.pcm_cache.values()) / self.bytes_per_second
-        print(f"Audio player: {len(self.pcm_cache)} files cached, {total_dur:.1f}s total")
+        self.log.info("%d files cached, %.1fs total", len(self.pcm_cache), total_dur)
 
     def _get_cache_path(self, file_path: Path) -> Path:
         rel = file_path.relative_to(self.stories_root)
@@ -248,7 +248,7 @@ class AudioPlayerPlugin(Plugin):
                 series_list = list(self.series_order)
                 random.shuffle(series_list)
 
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Loop {loop_num + 1} starting: {series_list}", flush=True)
+            self.log.info("Loop %d starting: %s", loop_num + 1, series_list)
 
             for series_name in series_list:
                 if not self.playing:
@@ -281,7 +281,7 @@ class AudioPlayerPlugin(Plugin):
                     self._emit_state()
 
                     dur = len(pcm) / self.bytes_per_second
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] ({self.current_file}, {dur:.1f}s)", flush=True)
+                    self.log.info("(%s, %.1fs)", self.current_file, dur)
 
                     self._abort_event.clear()
                     self.streaming = True
@@ -306,7 +306,7 @@ class AudioPlayerPlugin(Plugin):
 
     def start(self):
         super().start()
-        print("Audio player: ready (idle)")
+        self.log.info("ready (idle)")
 
     def stop(self):
         self._abort_event.set()
@@ -315,7 +315,7 @@ class AudioPlayerPlugin(Plugin):
         if self._thread:
             self._thread.join(timeout=5)
         super().stop()
-        print("Audio player: stopped")
+        self.log.info("stopped")
 
     def start_playback(self):
         if self._thread and self._thread.is_alive():

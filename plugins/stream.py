@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import subprocess
@@ -189,7 +190,7 @@ def _measure_loudness(url: str) -> float:
         gain_db = TARGET_LOUDNESS - input_i
         return max(-15.0, min(15.0, gain_db))
     except Exception as e:
-        print(f"loudness measurement failed: {e}", flush=True)
+        logging.getLogger("plugin.stream").warning("loudness measurement failed: %s", e)
         return 0.0
 
 
@@ -428,7 +429,7 @@ class StreamPlugin(Plugin):
             with open(path, "w") as f:
                 yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
         except Exception as e:
-            print(f"Stream: failed to save config: {e}", flush=True)
+            self.log.error("failed to save config: %s", e)
 
     def _build_preview_playlist(self) -> list[dict]:
         """Live preview from latest cache (as if starting a fresh session). Does not mutate play state."""
@@ -514,12 +515,9 @@ class StreamPlugin(Plugin):
         )
         self.playlist = planned
         self.current_index = 0 if planned else -1
-        print(
-            f"Stream: replan → {len(planned)} items "
-            f"(Vpool={len(v_pool)} Apool={len(a_pool)} "
-            f"screen={self.screen_played_sec/60:.1f}m total={self.total_played_sec/60:.1f}m)",
-            flush=True,
-        )
+        self.log.info("replan → %d items (Vpool=%d Apool=%d screen=%.1fm total=%.1fm)",
+                       len(planned), len(v_pool), len(a_pool),
+                       self.screen_played_sec / 60, self.total_played_sec / 60)
         return bool(planned)
 
     def _ensure_mixed_playlist_locked(self) -> bool:
@@ -562,7 +560,7 @@ class StreamPlugin(Plugin):
                     with self._lock:
                         self._yt_cache[handle] = videos
                 except Exception as e:
-                    print(f"Stream YT feed: failed {handle}: {e}", flush=True)
+                    self.log.warning("YT feed: failed %s: %s", handle, e)
                 delay = 0.5 if first_pass else self.feed_interval
                 self._feed_stop_event.wait(delay)
             first_pass = False
@@ -590,7 +588,7 @@ class StreamPlugin(Plugin):
                     with self._lock:
                         self._pc_cache[feed_name] = episodes
                 except Exception as e:
-                    print(f"Stream podcast feed: failed {feed_name}: {e}", flush=True)
+                    self.log.warning("podcast feed: failed %s: %s", feed_name, e)
                 delay = 0.5 if first_pass else self.feed_interval
                 self._feed_stop_event.wait(delay)
             first_pass = False
@@ -599,7 +597,7 @@ class StreamPlugin(Plugin):
         try:
             chromecasts, browser = pychromecast.get_chromecasts()
         except Exception as e:
-            print(f"Stream: discovery error: {e}", flush=True)
+            self.log.warning("discovery error: %s", e)
             return None
         self._browser = browser
         if chromecasts:
@@ -607,7 +605,7 @@ class StreamPlugin(Plugin):
             try:
                 cc.wait(timeout=10)
             except Exception as e:
-                print(f"Stream: device wait error: {e}", flush=True)
+                self.log.warning("device wait error: %s", e)
             return cc
         return None
 
@@ -625,8 +623,9 @@ class StreamPlugin(Plugin):
     def _play_current(self) -> str | None:
         """Play playlist[current_index]. May replan if needed. Returns error or None."""
         max_attempts = 12
-        for _ in range(max_attempts):
+        for attempt in range(max_attempts):
             if self._past_stop_time():
+                self.log.info("past stop time, stopping")
                 self._do_stop()
                 return "past stop time"
             with self._lock:
@@ -643,16 +642,24 @@ class StreamPlugin(Plugin):
             try:
                 if item.get("kind") == "video":
                     video_id = item.get("video_id") or ""
-                    # Re-resolve at play time to avoid stale feed-fetched URLs
+                    self.log.info("attempt %d/%d idx=%d id=%s title=%s kind=video",
+                                   attempt + 1, max_attempts, self.current_index,
+                                   video_id, item.get("title"))
                     info = self._ydl_play.extract_info(
                         f"https://youtube.com/watch?v={video_id}", download=False
                     )
                     url = info.get("url") or item.get("play_url")
                     dur = int(info.get("duration") or item.get("duration") or 0)
                     if not url:
+                        self.log.warning("resolve %s returned no url, fallback to feed url",
+                                          video_id)
+                        url = item.get("play_url") or ""
+                    if not url:
                         raise RuntimeError(f"could not resolve URL for {video_id}")
+                    self.log.info("resolve OK url_len=%d dur=%d", len(url), dur)
                     mc = cast.media_controller
                     mc.play_media(url, "video/mp4")
+                    self.log.info("play_media(video, ct=video/mp4, url_len=%d)", len(url))
                     with self._lock:
                         if self.current_index < len(self.playlist):
                             self.playlist[self.current_index]["duration"] = dur
@@ -660,10 +667,9 @@ class StreamPlugin(Plugin):
                         self._play_start = time.time()
                         self._media_duration_local = dur
                         self.status = "playing"
-                    print(
-                        f"Stream: playing video [{self.current_index + 1}/{len(self.playlist)}] {item.get('title')}",
-                        flush=True,
-                    )
+                    self.log.info("playing video [%d/%d] %s",
+                                   self.current_index + 1, len(self.playlist),
+                                   item.get("title"))
                     return None
                 else:
                     url = item.get("play_url") or ""
@@ -679,26 +685,27 @@ class StreamPlugin(Plugin):
                                 f"http://{host}:{port}/api/stream/audio_proxy"
                                 f"?url={quote(url)}&gain_db={gain_db}"
                             )
+                    self.log.info("attempt %d/%d idx=%d title=%s kind=audio",
+                                   attempt + 1, max_attempts, self.current_index,
+                                   item.get("title"))
                     mc = cast.media_controller
                     mc.play_media(url, "audio/mpeg")
+                    self.log.info("play_media(audio, ct=audio/mpeg, url_len=%d)", len(url))
                     with self._lock:
                         self._play_start = time.time()
                         self._media_duration_local = int(item.get("duration") or 0)
                         self.status = "playing"
-                    print(
-                        f"Stream: playing audio [{self.current_index + 1}/{len(self.playlist)}] {item.get('title')}",
-                        flush=True,
-                    )
+                    self.log.info("playing audio [%d/%d] %s",
+                                   self.current_index + 1, len(self.playlist),
+                                   item.get("title"))
                     return None
             except Exception as e:
-                print(
-                    f"Stream: skipping unavailable {item.get('title')}: {e}",
-                    flush=True,
-                )
+                self.log.warning("skipping unavailable %s: %s", item.get("title"), e)
                 with self._lock:
                     self.current_index += 1
         with self._lock:
             self.status = "connected_idle"
+        self.log.error("all %d attempts exhausted", max_attempts)
         return "all items unavailable"
 
     def _advance_and_play(self) -> str | None:
@@ -732,13 +739,13 @@ class StreamPlugin(Plugin):
                 return
             url = (self.outro_video_url or "").strip()
             if not url:
-                print("Stream: auto-stop at stop_time (no outro)", flush=True)
+                self.log.info("auto-stop at stop_time (no outro)")
                 self._do_stop()
                 return
-        print("Stream: auto-stop → playing outro", flush=True)
+        self.log.info("auto-stop → playing outro")
         err = self._start_outro()
         if err:
-            print(f"Stream: outro failed ({err}), full stop", flush=True)
+            self.log.error("outro failed (%s), full stop", err)
             with self._lock:
                 self._do_stop()
 
@@ -792,13 +799,15 @@ class StreamPlugin(Plugin):
                 self._media_duration_local = dur
                 self._outro_playing = True
                 self.status = "ending"
-            print(f"Stream: outro playing — {title} ({dur}s)", flush=True)
+            self.log.info("outro playing — %s (%ds)", title, dur)
             return None
         except Exception as e:
             return str(e)
 
     def _monitor_loop(self):
         prev_state = "UNKNOWN"
+        prev_reason = None
+        stuck_since = 0.0
         while not self._stop_event.is_set():
             try:
                 with self._lock:
@@ -823,7 +832,7 @@ class StreamPlugin(Plugin):
                         state = mc.status.player_state
                         idle_reason = mc.status.idle_reason
                     except Exception as e:
-                        print(f"Stream outro monitor: {e}", flush=True)
+                        self.log.warning("outro monitor error: %s", e)
                         state, idle_reason = "UNKNOWN", None
                     finished = (
                         state == "IDLE"
@@ -833,19 +842,25 @@ class StreamPlugin(Plugin):
                     elapsed = time.time() - play_start if play_start > 0 else 0
                     timed_out = media_dur > 0 and elapsed >= media_dur + 5
                     if finished or timed_out:
-                        print("Stream: outro done, full stop", flush=True)
+                        self.log.info("outro done, full stop")
                         with self._lock:
                             self._do_stop()
                         prev_state = "UNKNOWN"
                     else:
+                        if state != prev_state or idle_reason != prev_reason:
+                            self.log.debug("outro monitor: state=%s prev=%s reason=%s",
+                                            state, prev_state, idle_reason)
                         prev_state = state
+                        prev_reason = idle_reason
                     self._stop_event.wait(1)
                     continue
 
                 # Auto-stop time: start outro (or hard stop if none)
                 if past and status == "playing":
+                    self.log.info("past stop_time → begin auto-stop")
                     self._begin_auto_stop()
                     prev_state = "UNKNOWN"
+                    stuck_since = 0.0
                     self._stop_event.wait(1)
                     continue
 
@@ -873,14 +888,20 @@ class StreamPlugin(Plugin):
                             should_next = True
 
                 if should_next:
+                    self.log.info("advance: state=%s prev=%s reason=%s",
+                                   state, prev_state, idle_reason)
                     err = self._advance_and_play()
                     if err:
-                        print(f"Stream: advance stopped: {err}", flush=True)
+                        self.log.error("advance stopped: %s", err)
+                    stuck_since = 0.0
+                elif state != prev_state or idle_reason != prev_reason:
+                    self.log.debug("monitor: state=%s prev=%s reason=%s",
+                                    state, prev_state, idle_reason)
 
                 prev_state = state
+                prev_reason = idle_reason
             except Exception as e:
-                print(f"Stream monitor error: {e}", flush=True)
-            self._stop_event.wait(2)
+                self.log.exception("monitor error")
 
     def _do_stop(self):
         self._play_start = 0
@@ -917,7 +938,7 @@ class StreamPlugin(Plugin):
         self._pc_feed_thread = threading.Thread(target=self._pc_feed_loop, daemon=True)
         self._yt_feed_thread.start()
         self._pc_feed_thread.start()
-        print("Stream: ready (YT + podcast fetch in parallel)")
+        self.log.info("ready (YT + podcast fetch in parallel)")
 
     def stop(self):
         self._stop_event.set()
@@ -930,7 +951,7 @@ class StreamPlugin(Plugin):
             self._pc_feed_thread.join(timeout=5)
         self._do_stop()
         super().stop()
-        print("Stream: stopped")
+        self.log.info("stopped")
 
     def register_routes(self, app):
         from fastapi import Request
@@ -994,11 +1015,13 @@ class StreamPlugin(Plugin):
             loop = asyncio.get_event_loop()
             cast = await loop.run_in_executor(None, self._discover)
             if cast is None:
+                self.log.warning("/connect: no device found")
                 return {"ok": False, "error": "no device found"}
             with self._lock:
                 self._cast = cast
                 self.device_name = cast.name
                 self.status = "connected_idle"
+                self.log.info("/connect → device=%s", cast.name)
             return {"ok": True, "device": cast.name}
 
         @self.router.post("/play")
@@ -1006,15 +1029,19 @@ class StreamPlugin(Plugin):
             import asyncio
 
             if self._past_stop_time():
+                self.log.info("/play rejected: past stop time")
                 return {"ok": False, "error": "past stop time"}
             with self._lock:
                 if self._cast is None:
+                    self.log.info("/play rejected: not connected")
                     return {"ok": False, "error": "not connected"}
                 if self.status == "playing":
+                    self.log.info("/play rejected: already playing")
                     return {"ok": False, "error": "already playing"}
                 self.total_played_sec = 0.0
                 self.screen_played_sec = 0.0
                 if not self._replan_locked():
+                    self.log.warning("/play rejected: empty playlist")
                     return {"ok": False, "error": "playlist empty, try again later"}
                 if self._thread is None or not self._thread.is_alive():
                     self._stop_event.clear()
@@ -1022,6 +1049,7 @@ class StreamPlugin(Plugin):
                         target=self._monitor_loop, daemon=True
                     )
                     self._thread.start()
+            self.log.info("/play: starting (playlist=%d items)", len(self.playlist))
             loop = asyncio.get_event_loop()
             err = await loop.run_in_executor(None, self._play_current)
             if err:
@@ -1030,13 +1058,16 @@ class StreamPlugin(Plugin):
                     self.playlist = []
                     if self.status == "playing":
                         self.status = "connected_idle"
+                self.log.error("/play failed: %s", err)
                 return {"ok": False, "error": err}
+            self.log.info("/play OK")
             return {"ok": True}
 
         @self.router.post("/stop")
         async def stop_route():
             import asyncio
 
+            self.log.info("/stop")
             loop = asyncio.get_event_loop()
 
             def _locked_stop():
@@ -1051,19 +1082,21 @@ class StreamPlugin(Plugin):
             import asyncio
 
             with self._lock:
-                # During outro, Skip means confirm end → full stop
                 if self._outro_playing or self.status == "ending":
+                    self.log.info("/skip → outro confirm, full stop")
                     self._do_stop()
                     return {"ok": True}
             if self._past_stop_time():
-                # Trigger auto-stop path (outro or hard stop), not a normal skip
+                self.log.info("/skip → past stop time, auto-stop")
                 await asyncio.get_event_loop().run_in_executor(
                     None, self._begin_auto_stop
                 )
                 return {"ok": True}
             with self._lock:
                 if self.status != "playing":
+                    self.log.info("/skip rejected: not playing")
                     return {"ok": False, "error": "not playing"}
+            self.log.info("/skip: advancing from idx=%d", self.current_index)
             loop = asyncio.get_event_loop()
             if self._cast:
                 try:
