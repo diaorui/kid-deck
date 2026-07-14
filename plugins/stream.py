@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import re
-import socket
 import subprocess
 import threading
 import time
@@ -23,17 +22,6 @@ if deno not in os.environ.get("PATH", ""):
 import yt_dlp
 
 from plugins import Plugin
-
-
-def _local_ip() -> str:
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    except Exception:
-        return "127.0.0.1"
-    finally:
-        s.close()
 
 
 def parse_time(time_str: str) -> dtime:
@@ -686,14 +674,8 @@ class StreamPlugin(Plugin):
                         if self.current_index < len(self.playlist):
                             self.playlist[self.current_index]["duration"] = dur
                             self.playlist[self.current_index]["play_url"] = url
-                    port = self.controller.config.get("server", {}).get("port", 8080)
-                    url = (
-                        f"http://{_local_ip()}:{port}/api/stream/video_proxy"
-                        f"?url={quote(url)}"
-                    )
                     mc = cast.media_controller
                     mc.play_media(url, "video/mp4")
-                    mc.block_until_active(timeout=15)
                     self.log.info("play_media(video, ct=video/mp4, url_len=%d)", len(url))
                     with self._lock:
                         self._play_start = time.time()
@@ -709,11 +691,14 @@ class StreamPlugin(Plugin):
                         raise RuntimeError("missing audio url")
                     gain_db = item.get("gain_db", 0.0)
                     if gain_db != 0.0:
-                        port = self.controller.config.get("server", {}).get("port", 8080)
-                        url = (
-                            f"http://{_local_ip()}:{port}/api/stream/audio_proxy"
-                            f"?url={quote(url)}&gain_db={gain_db}"
-                        )
+                        server = self.controller.config.get("server", {})
+                        host = server.get("host", "0.0.0.0")
+                        port = server.get("port", 8080)
+                        if host and host != "0.0.0.0":
+                            url = (
+                                f"http://{host}:{port}/api/stream/audio_proxy"
+                                f"?url={quote(url)}&gain_db={gain_db}"
+                            )
                     self.log.info("attempt %d/%d idx=%d title=%s kind=audio",
                                    attempt + 1, max_attempts, self.current_index,
                                    item.get("title"))
@@ -938,6 +923,8 @@ class StreamPlugin(Plugin):
                     with self._lock:
                         self._do_stop()
                     prev_state = "UNKNOWN"
+
+            self._stop_event.wait(2)
 
     def _do_stop(self):
         self._play_start = 0
@@ -1283,25 +1270,6 @@ class StreamPlugin(Plugin):
                     proc.wait()
 
             return StreamingResponse(_proxy(), media_type="audio/mpeg")
-
-        @self.router.get("/video_proxy")
-        async def video_proxy(url: str):
-            from fastapi.responses import StreamingResponse
-
-            r = requests.get(url, stream=True, timeout=30)
-
-            def _stream():
-                try:
-                    while True:
-                        chunk = r.raw.read(65536)
-                        if not chunk:
-                            break
-                        yield chunk
-                finally:
-                    r.close()
-
-            content_type = r.headers.get("content-type", "video/mp4")
-            return StreamingResponse(_stream(), media_type=content_type)
 
         app.include_router(self.router)
 
