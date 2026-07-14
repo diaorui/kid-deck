@@ -25,13 +25,13 @@ import yt_dlp
 from plugins import Plugin
 
 
-def _local_ip() -> str:
+def _local_ip() -> str | None:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
         return s.getsockname()[0]
     except Exception:
-        return "127.0.0.1"
+        return None
     finally:
         s.close()
 
@@ -703,14 +703,17 @@ class StreamPlugin(Plugin):
                         raise RuntimeError("missing audio url")
                     gain_db = item.get("gain_db", 0.0)
                     if gain_db != 0.0:
+                        local_ip = _local_ip()
+                        if not local_ip:
+                            raise RuntimeError("cannot apply gain_db: no LAN IP detected")
                         port = self.controller.config.get("server", {}).get("port", 8080)
                         url = (
-                            f"http://{_local_ip()}:{port}/api/stream/audio_proxy"
+                            f"http://{local_ip}:{port}/api/stream/audio_proxy"
                             f"?url={quote(url)}&gain_db={gain_db}"
                         )
-                    self.log.info("attempt %d/%d idx=%d title=%s kind=audio",
+                    self.log.info("attempt %d/%d idx=%d title=%s kind=audio gain_db=%.1f",
                                    attempt + 1, max_attempts, self.current_index,
-                                   item.get("title"))
+                                   item.get("title"), gain_db)
                     mc = cast.media_controller
                     mc.play_media(url, "audio/mpeg")
                     self.log.info("play_media(audio, ct=audio/mpeg, url_len=%d)", len(url))
@@ -1256,18 +1259,19 @@ class StreamPlugin(Plugin):
 
         @self.router.get("/audio_proxy")
         async def audio_proxy(url: str, gain_db: float = 0.0):
-            from fastapi.responses import StreamingResponse
+            from fastapi.responses import StreamingResponse, JSONResponse
+
+            proc = subprocess.Popen(
+                [
+                    "ffmpeg", "-i", url,
+                    "-af", f"volume={gain_db}dB",
+                    "-f", "mp3", "-",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
 
             def _proxy():
-                proc = subprocess.Popen(
-                    [
-                        "ffmpeg", "-i", url,
-                        "-af", f"volume={gain_db}dB",
-                        "-f", "mp3", "-",
-                    ],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                )
                 try:
                     while True:
                         chunk = proc.stdout.read(65536)
@@ -1277,6 +1281,21 @@ class StreamPlugin(Plugin):
                 finally:
                     proc.kill()
                     proc.wait()
+
+            # Check ffmpeg started successfully before streaming
+            import select
+            ready, _, _ = select.select([proc.stderr], [], [], 0.5)
+            if ready:
+                err = proc.stderr.read(1024)
+                if b"Error" in err or b"error" in err:
+                    proc.kill()
+                    proc.wait()
+                    self.log.error("audio_proxy ffmpeg error for url=%s gain_db=%.1f: %s",
+                                   url[:80], gain_db, err[:200].decode("utf-8", errors="replace"))
+                    return JSONResponse(
+                        {"ok": False, "error": f"ffmpeg failed: {err[:200].decode('utf-8', errors='replace')}"},
+                        status_code=500,
+                    )
 
             return StreamingResponse(_proxy(), media_type="audio/mpeg")
 
