@@ -368,7 +368,7 @@ class StreamPlugin(Plugin):
                 "playlistend": self.yt_fetch_per_channel,
                 "socket_timeout": 30,
                 "remote_components": ["ejs:github"],
-                "extractor_args": {"youtube": ["player_client=web"]},
+                "extractor_args": {"youtube": ["player_client=android"]},
             }
         )
         self._ydl_play = yt_dlp.YoutubeDL(
@@ -377,7 +377,7 @@ class StreamPlugin(Plugin):
                 "quiet": True,
                 "socket_timeout": 30,
                 "remote_components": ["ejs:github"],
-                "extractor_args": {"youtube": ["player_client=web"]},
+                "extractor_args": {"youtube": ["player_client=android"]},
             }
         )
 

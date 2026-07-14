@@ -113,7 +113,7 @@ class YTCastPlugin(Plugin):
             'playlistend': 5,
             'socket_timeout': 30,
             'remote_components': ['ejs:github'],
-            'extractor_args': {'youtube': ['player_client=web']},
+            'extractor_args': {'youtube': ['player_client=android']},
         })
 
     def _build_preview(self) -> list[dict]:
