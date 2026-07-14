@@ -25,7 +25,7 @@ def setup_logging(cfg: dict):
     level = getattr(logging, (log_cfg.get("level", "DEBUG")).upper(), logging.DEBUG)
 
     fh = RotatingFileHandler(log_path, maxBytes=max_bytes, backupCount=backup_count)
-    fh.setLevel(level)
+    fh.setLevel(logging.DEBUG)
     fh.setFormatter(logging.Formatter(
         "%(asctime)s [%(levelname)-7s] [%(name)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
@@ -36,9 +36,14 @@ def setup_logging(cfg: dict):
     ch.setFormatter(logging.Formatter("[%(name)s] %(message)s"))
 
     root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
+    root.setLevel(logging.INFO)
     root.addHandler(fh)
     root.addHandler(ch)
+
+    for name in ("controller", "plugin.stream", "plugin.yt_cast",
+                  "plugin.podcast_player", "plugin.audio_player", "plugin.alarm"):
+        logging.getLogger(name).setLevel(level)
+
     return logging.getLogger("controller")
 
 
