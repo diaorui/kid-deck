@@ -672,6 +672,7 @@ class StreamPlugin(Plugin):
                                    len(url), dur, ext, fmt_id, proto, has_manifest, url)
                     mc = cast.media_controller
                     mc.play_media(url, "video/mp4")
+                    mc.block_until_active(timeout=15)
                     self.log.info("play_media(video, ct=video/mp4, url_len=%d)", len(url))
                     with self._lock:
                         if self.current_index < len(self.playlist):
