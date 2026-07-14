@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import socket
 import subprocess
 import threading
 import time
@@ -22,6 +23,17 @@ if deno not in os.environ.get("PATH", ""):
 import yt_dlp
 
 from plugins import Plugin
+
+
+def _local_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
 
 
 def parse_time(time_str: str) -> dtime:
@@ -691,14 +703,11 @@ class StreamPlugin(Plugin):
                         raise RuntimeError("missing audio url")
                     gain_db = item.get("gain_db", 0.0)
                     if gain_db != 0.0:
-                        server = self.controller.config.get("server", {})
-                        host = server.get("host", "0.0.0.0")
-                        port = server.get("port", 8080)
-                        if host and host != "0.0.0.0":
-                            url = (
-                                f"http://{host}:{port}/api/stream/audio_proxy"
-                                f"?url={quote(url)}&gain_db={gain_db}"
-                            )
+                        port = self.controller.config.get("server", {}).get("port", 8080)
+                        url = (
+                            f"http://{_local_ip()}:{port}/api/stream/audio_proxy"
+                            f"?url={quote(url)}&gain_db={gain_db}"
+                        )
                     self.log.info("attempt %d/%d idx=%d title=%s kind=audio",
                                    attempt + 1, max_attempts, self.current_index,
                                    item.get("title"))
