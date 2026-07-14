@@ -352,6 +352,7 @@ class StreamPlugin(Plugin):
         self._thread: threading.Thread | None = None
         self._yt_cache: dict[str, list[dict]] = {}
         self._pc_cache: dict[str, list[dict]] = {}
+        self._gain_cache: dict[str, float] = {}
         self._yt_feed_thread: threading.Thread | None = None
         self._pc_feed_thread: threading.Thread | None = None
         self._feed_stop_event = threading.Event()
@@ -582,7 +583,9 @@ class StreamPlugin(Plugin):
                     )
                     for ep in episodes:
                         if ep.get("duration", 0) >= 60:
-                            ep["gain_db"] = _measure_loudness(ep["url"])
+                            if ep["url"] not in self._gain_cache:
+                                self._gain_cache[ep["url"]] = _measure_loudness(ep["url"])
+                            ep["gain_db"] = self._gain_cache[ep["url"]]
                         else:
                             ep["gain_db"] = 0.0
                     with self._lock:

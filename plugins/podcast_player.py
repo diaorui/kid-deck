@@ -196,6 +196,7 @@ class PodcastPlugin(Plugin):
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._feed_cache: dict[str, list[dict]] = {}
+        self._gain_cache: dict[str, float] = {}
         self._feed_thread: threading.Thread | None = None
         self._feed_stop_event = threading.Event()
         self._play_start: float = 0
@@ -278,7 +279,9 @@ class PodcastPlugin(Plugin):
                     episodes = _fetch_feed(feed_name, info["url"])
                     for ep in episodes:
                         if ep.get("duration", 0) >= 60:
-                            ep["gain_db"] = _measure_loudness(ep["url"])
+                            if ep["url"] not in self._gain_cache:
+                                self._gain_cache[ep["url"]] = _measure_loudness(ep["url"])
+                            ep["gain_db"] = self._gain_cache[ep["url"]]
                         else:
                             ep["gain_db"] = 0.0
                     with self._lock:
@@ -457,7 +460,9 @@ class PodcastPlugin(Plugin):
                         episodes = _fetch_feed(feed_name, info["url"])
                         for ep in episodes:
                             if ep.get("duration", 0) >= 60:
-                                ep["gain_db"] = _measure_loudness(ep["url"])
+                                if ep["url"] not in self._gain_cache:
+                                    self._gain_cache[ep["url"]] = _measure_loudness(ep["url"])
+                                ep["gain_db"] = self._gain_cache[ep["url"]]
                             else:
                                 ep["gain_db"] = 0.0
                         with self._lock:
