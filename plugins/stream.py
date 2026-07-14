@@ -375,7 +375,7 @@ class StreamPlugin(Plugin):
         # Separate ydl instances so YT feed thread and play resolve never share one
         self._ydl = yt_dlp.YoutubeDL(
             {
-                "format": "18",
+                "format": "22/18",
                 "quiet": True,
                 "playlistend": self.yt_fetch_per_channel,
                 "socket_timeout": 30,
@@ -385,7 +385,7 @@ class StreamPlugin(Plugin):
         )
         self._ydl_play = yt_dlp.YoutubeDL(
             {
-                "format": "18",
+                "format": "22/18",
                 "quiet": True,
                 "socket_timeout": 30,
                 "remote_components": ["ejs:github"],
