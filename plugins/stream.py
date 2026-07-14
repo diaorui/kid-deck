@@ -660,7 +660,12 @@ class StreamPlugin(Plugin):
                         url = item.get("play_url") or ""
                     if not url:
                         raise RuntimeError(f"could not resolve URL for {video_id}")
-                    self.log.info("resolve OK url_len=%d dur=%d", len(url), dur)
+                    ext = info.get("ext", "?")
+                    fmt_id = info.get("format_id", "?")
+                    proto = info.get("protocol", "?")
+                    has_manifest = "manifest_url" in info or "manifest" in str(info.get("url", ""))
+                    self.log.info("resolve OK url_len=%d dur=%d ext=%s fmt=%s proto=%s manifest=%s url_preview=%s...",
+                                   len(url), dur, ext, fmt_id, proto, has_manifest, url[:150])
                     mc = cast.media_controller
                     mc.play_media(url, "video/mp4")
                     self.log.info("play_media(video, ct=video/mp4, url_len=%d)", len(url))
