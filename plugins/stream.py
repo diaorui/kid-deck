@@ -605,7 +605,7 @@ class StreamPlugin(Plugin):
             if self._browser is None:
                 self._browser = CastBrowser(SimpleCastListener(), zc)
                 self._browser.start_discovery()
-                time.sleep(3)
+                time.sleep(30)
             if not self._browser.devices:
                 return None
             device = list(self._browser.devices.values())[0]
