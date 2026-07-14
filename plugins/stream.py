@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import pychromecast
+from pychromecast.discovery import CastBrowser, SimpleCastListener
 import requests
 
 deno = os.path.expanduser("~/.deno/bin")
@@ -598,18 +599,21 @@ class StreamPlugin(Plugin):
 
     def _discover(self) -> pychromecast.Chromecast | None:
         try:
-            chromecasts, browser = pychromecast.get_chromecasts()
+            zc = getattr(self.controller, "zc", None)
+            if zc is None:
+                return None
+            if self._browser is None:
+                self._browser = CastBrowser(SimpleCastListener(), zc)
+                self._browser.start_discovery()
+                time.sleep(3)
+            if not self._browser.devices:
+                return None
+            device = list(self._browser.devices.values())[0]
+            cc = pychromecast.get_chromecast_from_cast_info(device, zc)
+            cc.wait(timeout=10)
+            return cc
         except Exception as e:
             self.log.warning("discovery error: %s", e)
-            return None
-        self._browser = browser
-        if chromecasts:
-            cc = chromecasts[0]
-            try:
-                cc.wait(timeout=10)
-            except Exception as e:
-                self.log.warning("device wait error: %s", e)
-            return cc
         return None
 
     def _record_progress_locked(self, item: dict | None):
@@ -664,8 +668,8 @@ class StreamPlugin(Plugin):
                     fmt_id = info.get("format_id", "?")
                     proto = info.get("protocol", "?")
                     has_manifest = "manifest_url" in info or "manifest" in str(info.get("url", ""))
-                    self.log.info("resolve OK url_len=%d dur=%d ext=%s fmt=%s proto=%s manifest=%s url_preview=%s...",
-                                   len(url), dur, ext, fmt_id, proto, has_manifest, url[:150])
+                    self.log.info("resolve OK url_len=%d dur=%d ext=%s fmt=%s proto=%s manifest=%s url=%s",
+                                   len(url), dur, ext, fmt_id, proto, has_manifest, url)
                     mc = cast.media_controller
                     mc.play_media(url, "video/mp4")
                     self.log.info("play_media(video, ct=video/mp4, url_len=%d)", len(url))

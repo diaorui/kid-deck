@@ -12,6 +12,7 @@ import yaml
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+from zeroconf import Zeroconf
 
 from camera_client import CameraClient, check_deps
 from plugins import Plugin
@@ -121,6 +122,7 @@ def main():
 
     controller = Controller()
     controller.config = cfg
+    controller.zc = Zeroconf()
 
     camera_cfg = cfg.get("camera", {})
     controller.camera = CameraClient(camera_cfg)
@@ -186,6 +188,10 @@ async def _do_restart(controller: Controller):
     for plugin in controller.plugins:
         plugin.stop()
     controller.camera.close()
+    try:
+        controller.zc.close()
+    except Exception:
+        pass
     os.execv(sys.executable, [sys.executable, __file__] + sys.argv[1:])
 
 

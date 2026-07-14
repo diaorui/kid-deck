@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import pychromecast
+from pychromecast.discovery import CastBrowser, SimpleCastListener
 import requests
 
 from plugins import Plugin
@@ -204,18 +205,21 @@ class PodcastPlugin(Plugin):
 
     def _discover(self) -> pychromecast.Chromecast | None:
         try:
-            chromecasts, browser = pychromecast.get_chromecasts()
+            zc = getattr(self.controller, "zc", None)
+            if zc is None:
+                return None
+            if self._browser is None:
+                self._browser = CastBrowser(SimpleCastListener(), zc)
+                self._browser.start_discovery()
+                time.sleep(3)
+            if not self._browser.devices:
+                return None
+            device = list(self._browser.devices.values())[0]
+            cc = pychromecast.get_chromecast_from_cast_info(device, zc)
+            cc.wait(timeout=10)
+            return cc
         except Exception as e:
             self.log.warning("discovery error: %s", e)
-            return None
-        self._browser = browser
-        if chromecasts:
-            cc = chromecasts[0]
-            try:
-                cc.wait(timeout=10)
-            except Exception as e:
-                self.log.warning("device wait error: %s", e)
-            return cc
         return None
 
     def _play_next(self) -> str | None:
