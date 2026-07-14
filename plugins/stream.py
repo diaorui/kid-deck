@@ -179,9 +179,9 @@ def _measure_loudness(url: str) -> float:
                 "-af", "loudnorm=I=-16:print_format=json",
                 "-f", "null", "-",
             ],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, timeout=120,
         )
-        stderr = proc.stderr
+        stderr = proc.stderr.decode("utf-8", errors="replace")
         start = stderr.find("{")
         if start == -1:
             return 0.0
