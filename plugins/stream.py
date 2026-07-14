@@ -1259,7 +1259,7 @@ class StreamPlugin(Plugin):
 
         @self.router.get("/audio_proxy")
         async def audio_proxy(url: str, gain_db: float = 0.0):
-            from fastapi.responses import StreamingResponse, JSONResponse
+            from fastapi.responses import StreamingResponse
 
             proc = subprocess.Popen(
                 [
@@ -1272,34 +1272,19 @@ class StreamPlugin(Plugin):
                     "-f", "mp3", "-",
                 ],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
             )
 
             def _proxy():
                 try:
                     while True:
-                        chunk = proc.stdout.read(65536)
+                        chunk = proc.stdout.read(4096)
                         if not chunk:
                             break
                         yield chunk
                 finally:
                     proc.kill()
                     proc.wait()
-
-            # Check ffmpeg started successfully before streaming
-            import select
-            ready, _, _ = select.select([proc.stderr], [], [], 0.5)
-            if ready:
-                err = proc.stderr.read(1024)
-                if b"Error" in err or b"error" in err:
-                    proc.kill()
-                    proc.wait()
-                    self.log.error("audio_proxy ffmpeg error for url=%s gain_db=%.1f: %s",
-                                   url[:80], gain_db, err[:200].decode("utf-8", errors="replace"))
-                    return JSONResponse(
-                        {"ok": False, "error": f"ffmpeg failed: {err[:200].decode('utf-8', errors='replace')}"},
-                        status_code=500,
-                    )
 
             return StreamingResponse(_proxy(), media_type="audio/mpeg")
 
