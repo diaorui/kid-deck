@@ -674,14 +674,6 @@ class StreamPlugin(Plugin):
                         if self.current_index < len(self.playlist):
                             self.playlist[self.current_index]["duration"] = dur
                             self.playlist[self.current_index]["play_url"] = url
-                    server = self.controller.config.get("server", {})
-                    host = server.get("host", "0.0.0.0")
-                    port = server.get("port", 8080)
-                    if host and host != "0.0.0.0":
-                        url = (
-                            f"http://{host}:{port}/api/stream/video_proxy"
-                            f"?url={quote(url)}"
-                        )
                     mc = cast.media_controller
                     mc.play_media(url, "video/mp4")
                     mc.block_until_active(timeout=15)
@@ -928,6 +920,10 @@ class StreamPlugin(Plugin):
                 prev_reason = idle_reason
             except Exception as e:
                 self.log.exception("monitor error")
+                if isinstance(e, pychromecast.error.NotConnected):
+                    with self._lock:
+                        self._do_stop()
+                    prev_state = "UNKNOWN"
 
     def _do_stop(self):
         self._play_start = 0
@@ -1273,25 +1269,6 @@ class StreamPlugin(Plugin):
                     proc.wait()
 
             return StreamingResponse(_proxy(), media_type="audio/mpeg")
-
-        @self.router.get("/video_proxy")
-        async def video_proxy(url: str):
-            from fastapi.responses import StreamingResponse
-
-            r = requests.get(url, stream=True, timeout=30)
-
-            def _stream():
-                try:
-                    while True:
-                        chunk = r.raw.read(65536)
-                        if not chunk:
-                            break
-                        yield chunk
-                finally:
-                    r.close()
-
-            content_type = r.headers.get("content-type", "video/mp4")
-            return StreamingResponse(_stream(), media_type=content_type)
 
         app.include_router(self.router)
 

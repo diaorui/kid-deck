@@ -267,6 +267,9 @@ class YTCastPlugin(Plugin):
                 prev_content = content_id
             except Exception as e:
                 self.log.exception("monitor error")
+                if isinstance(e, pychromecast.error.NotConnected):
+                    with self._lock:
+                        self._do_stop()
 
             self._stop_event.wait(2)
 
