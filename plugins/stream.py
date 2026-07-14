@@ -629,12 +629,13 @@ class StreamPlugin(Plugin):
                 self._do_stop()
                 return "past stop time"
             with self._lock:
-                if not self._ensure_mixed_playlist_locked():
-                    self.status = "connected_idle"
-                    return "playlist empty"
                 if self.current_index < 0 or self.current_index >= len(self.playlist):
-                    self.status = "connected_idle"
-                    return "playlist empty"
+                    if not self._ensure_mixed_playlist_locked():
+                        self.status = "connected_idle"
+                        return "playlist empty"
+                    if self.current_index < 0 or self.current_index >= len(self.playlist):
+                        self.status = "connected_idle"
+                        return "playlist empty"
                 item = dict(self.playlist[self.current_index])
                 cast = self._cast
             if cast is None:
@@ -701,8 +702,11 @@ class StreamPlugin(Plugin):
                     return None
             except Exception as e:
                 self.log.warning("skipping unavailable %s: %s", item.get("title"), e)
-                with self._lock:
-                    self.current_index += 1
+                if attempt < max_attempts - 1:
+                    with self._lock:
+                        self.status = "retrying"
+                    self.log.info("retrying in 2s")
+                    time.sleep(2)
         with self._lock:
             self.status = "connected_idle"
         self.log.error("all %d attempts exhausted", max_attempts)
@@ -1654,6 +1658,8 @@ class StreamPlugin(Plugin):
               statusEl.textContent = 'Connected: ' + (s.device_name || '');
             } else if (s.status === 'ending') {
               statusEl.textContent = 'Ending 🎵 ' + ((s.current && s.current.title) || 'Goodnight');
+            } else if (s.status === 'retrying') {
+              statusEl.textContent = 'Retrying\u2026';
             } else if (s.status === 'playing' && s.current) {
               var k = s.current.kind === 'video' ? '▶' : '🎧';
               statusEl.textContent = k + ' ' + (s.current.title || '');
