@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -39,6 +40,14 @@ def _local_ip() -> str | None:
 def parse_time(time_str: str) -> dtime:
     parts = time_str.strip().split(":")
     return dtime(int(parts[0]), int(parts[1]))
+
+_AUDIO_CACHE = Path("/tmp/storyteller_audio")
+_AUDIO_CACHE.mkdir(parents=True, exist_ok=True)
+
+
+def _audio_cache_path(url: str) -> Path:
+    key = hashlib.md5(url.encode()).hexdigest()[:16]
+    return _AUDIO_CACHE / f"{key}.mp3"
 
 
 def parse_youtube_id(value: str) -> str | None:
@@ -599,6 +608,19 @@ class StreamPlugin(Plugin):
                             if ep["url"] not in self._gain_cache:
                                 self._gain_cache[ep["url"]] = _measure_loudness(ep["url"])
                             ep["gain_db"] = self._gain_cache[ep["url"]]
+                            gain_db = ep["gain_db"]
+                            if gain_db != 0.0:
+                                cache_path = _audio_cache_path(ep["url"])
+                                if not cache_path.exists():
+                                    try:
+                                        subprocess.run(
+                                            ["ffmpeg", "-i", ep["url"],
+                                             "-af", f"volume={gain_db}dB",
+                                             "-f", "mp3", "-y", str(cache_path)],
+                                            capture_output=True, timeout=30,
+                                        )
+                                    except Exception:
+                                        pass  # cache failed, will use real-time proxy
                         else:
                             ep["gain_db"] = 0.0
                     with self._lock:
@@ -607,6 +629,11 @@ class StreamPlugin(Plugin):
                     self.log.warning("podcast feed: failed %s: %s", feed_name, e)
                 delay = 0.5 if first_pass else self.feed_interval
                 self._feed_stop_event.wait(delay)
+            # Clean stale cache files
+            valid = {hashlib.md5(k.encode()).hexdigest()[:16] for k in self._gain_cache}
+            for f in _AUDIO_CACHE.glob("*.mp3"):
+                if f.stem not in valid:
+                    f.unlink(missing_ok=True)
             first_pass = False
 
     def _discover(self) -> pychromecast.Chromecast | None:
@@ -703,14 +730,21 @@ class StreamPlugin(Plugin):
                         raise RuntimeError("missing audio url")
                     gain_db = item.get("gain_db", 0.0)
                     if gain_db != 0.0:
-                        local_ip = _local_ip()
-                        if not local_ip:
-                            raise RuntimeError("cannot apply gain_db: no LAN IP detected")
-                        port = self.controller.config.get("server", {}).get("port", 8080)
-                        url = (
-                            f"http://{local_ip}:{port}/api/stream/audio_proxy"
-                            f"?url={quote(url)}&gain_db={gain_db}"
-                        )
+                        cache_path = _audio_cache_path(url)
+                        if cache_path.exists():
+                            local_ip = _local_ip()
+                            if local_ip:
+                                port = self.controller.config.get("server", {}).get("port", 8080)
+                                url = f"http://{local_ip}:{port}/api/stream/audio_cache/{cache_path.name}"
+                        else:
+                            local_ip = _local_ip()
+                            if not local_ip:
+                                raise RuntimeError("cannot apply gain_db: no LAN IP detected")
+                            port = self.controller.config.get("server", {}).get("port", 8080)
+                            url = (
+                                f"http://{local_ip}:{port}/api/stream/audio_proxy"
+                                f"?url={quote(url)}&gain_db={gain_db}"
+                            )
                     self.log.info("attempt %d/%d idx=%d title=%s kind=audio gain_db=%.1f",
                                    attempt + 1, max_attempts, self.current_index,
                                    item.get("title"), gain_db)
@@ -1298,6 +1332,16 @@ class StreamPlugin(Plugin):
                     )
 
             return StreamingResponse(_proxy(), media_type="audio/mpeg")
+
+        @self.router.get("/audio_cache/{filename}")
+        async def audio_cache(filename: str):
+            from fastapi.responses import FileResponse, JSONResponse
+
+            path = _AUDIO_CACHE / filename
+            if not path.exists():
+                self.log.warning("audio_cache not found: %s", filename)
+                return JSONResponse({"error": "not found"}, status_code=500)
+            return FileResponse(path, media_type="audio/mpeg")
 
         app.include_router(self.router)
 

@@ -1,5 +1,7 @@
+import hashlib
 import json
 import logging
+import socket
 import subprocess
 import threading
 import time
@@ -136,6 +138,27 @@ def _measure_loudness(url: str) -> float:
         return 0.0
 
 
+def _local_ip() -> str | None:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return None
+
+
+_AUDIO_CACHE = Path("/tmp/storyteller_audio")
+_AUDIO_CACHE.mkdir(parents=True, exist_ok=True)
+
+
+def _audio_cache_path(url: str) -> Path:
+    key = hashlib.md5(url.encode()).hexdigest()[:16]
+    return _AUDIO_CACHE / f"{key}.mp3"
+
+
 def _fetch_feed(feed_name: str, feed_url: str) -> list[dict]:
     r = requests.get(feed_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
     root = ET.fromstring(r.content)
@@ -234,12 +257,19 @@ class PodcastPlugin(Plugin):
                 mp3_url = episode["url"]
                 gain_db = episode.get("gain_db", 0.0)
             if gain_db != 0.0:
-                server = self.controller.config.get("server", {})
-                host = server.get("host", "0.0.0.0")
-                port = server.get("port", 8080)
-                if host and host != "0.0.0.0":
+                cache_path = _audio_cache_path(mp3_url)
+                if cache_path.exists():
+                    local_ip = _local_ip()
+                    if local_ip:
+                        port = self.controller.config.get("server", {}).get("port", 8080)
+                        mp3_url = f"http://{local_ip}:{port}/api/podcast_player/audio_cache/{cache_path.name}"
+                else:
+                    local_ip = _local_ip()
+                    if not local_ip:
+                        raise RuntimeError("cannot apply gain_db: no LAN IP detected")
+                    port = self.controller.config.get("server", {}).get("port", 8080)
                     mp3_url = (
-                        f"http://{host}:{port}/api/podcast_player/audio_proxy"
+                        f"http://{local_ip}:{port}/api/podcast_player/audio_proxy"
                         f"?url={quote(mp3_url)}&gain_db={gain_db}"
                     )
             try:
@@ -286,6 +316,19 @@ class PodcastPlugin(Plugin):
                             if ep["url"] not in self._gain_cache:
                                 self._gain_cache[ep["url"]] = _measure_loudness(ep["url"])
                             ep["gain_db"] = self._gain_cache[ep["url"]]
+                            gain_db = ep["gain_db"]
+                            if gain_db != 0.0:
+                                cache_path = _audio_cache_path(ep["url"])
+                                if not cache_path.exists():
+                                    try:
+                                        subprocess.run(
+                                            ["ffmpeg", "-i", ep["url"],
+                                             "-af", f"volume={gain_db}dB",
+                                             "-f", "mp3", "-y", str(cache_path)],
+                                            capture_output=True, timeout=30,
+                                        )
+                                    except Exception:
+                                        pass  # cache failed, will use real-time proxy
                         else:
                             ep["gain_db"] = 0.0
                     with self._lock:
@@ -294,6 +337,11 @@ class PodcastPlugin(Plugin):
                     self.log.warning("feed: failed to fetch %s: %s", feed_name, e)
                 delay = 0.5 if first_pass else self.feed_interval
                 self._feed_stop_event.wait(delay)
+            # Clean stale cache files
+            valid = {hashlib.md5(k.encode()).hexdigest()[:16] for k in self._gain_cache}
+            for f in _AUDIO_CACHE.glob("*.mp3"):
+                if f.stem not in valid:
+                    f.unlink(missing_ok=True)
             first_pass = False
 
     def _save_config(self):
@@ -604,18 +652,19 @@ class PodcastPlugin(Plugin):
 
         @self.router.get("/audio_proxy")
         async def audio_proxy(url: str, gain_db: float = 0.0):
-            from fastapi.responses import StreamingResponse
+            from fastapi.responses import StreamingResponse, JSONResponse
+
+            proc = subprocess.Popen(
+                [
+                    "ffmpeg", "-i", url,
+                    "-af", f"volume={gain_db}dB",
+                    "-f", "mp3", "-",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
 
             def _proxy():
-                proc = subprocess.Popen(
-                    [
-                        "ffmpeg", "-i", url,
-                        "-af", f"volume={gain_db}dB",
-                        "-f", "mp3", "-",
-                    ],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                )
                 try:
                     while True:
                         chunk = proc.stdout.read(65536)
@@ -626,7 +675,31 @@ class PodcastPlugin(Plugin):
                     proc.kill()
                     proc.wait()
 
+            import select
+            ready, _, _ = select.select([proc.stderr], [], [], 0.5)
+            if ready:
+                err = proc.stderr.read(1024)
+                if b"Error" in err or b"error" in err:
+                    proc.kill()
+                    proc.wait()
+                    self.log.error("audio_proxy ffmpeg error for url=%s gain_db=%.1f: %s",
+                                   url[:80], gain_db, err[:200].decode("utf-8", errors="replace"))
+                    return JSONResponse(
+                        {"ok": False, "error": f"ffmpeg failed: {err[:200].decode('utf-8', errors='replace')}"},
+                        status_code=500,
+                    )
+
             return StreamingResponse(_proxy(), media_type="audio/mpeg")
+
+        @self.router.get("/audio_cache/{filename}")
+        async def audio_cache(filename: str):
+            from fastapi.responses import FileResponse, JSONResponse
+
+            path = _AUDIO_CACHE / filename
+            if not path.exists():
+                self.log.warning("audio_cache not found: %s", filename)
+                return JSONResponse({"error": "not found"}, status_code=500)
+            return FileResponse(path, media_type="audio/mpeg")
 
         app.include_router(self.router)
 
