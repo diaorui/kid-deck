@@ -369,12 +369,7 @@ class PodcastPlugin(Plugin):
         self._cast = None
         self.status = "disconnected"
         self.device_name = ""
-        if self._browser:
-            try:
-                self._browser.stop_discovery()
-            except Exception:
-                pass
-            self._browser = None
+        self._browser = None
 
     def _do_disconnect(self):
         self._do_stop()
