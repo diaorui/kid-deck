@@ -158,7 +158,7 @@ class YTCastPlugin(Plugin):
                 return None
             device = list(self._browser.devices.values())[0]
             cc = pychromecast.get_chromecast_from_cast_info(device, zc)
-            cc.wait(timeout=10)
+            cc.wait(timeout=30)
             return cc
         except Exception as e:
             self.log.warning("discovery error: %s", e)
