@@ -289,13 +289,19 @@ def plan_playlist(
     screen0: float,
     total0: float,
     ratio: float,
+    horizon_hours: float,
 ) -> list[dict]:
-    """Interleave newest pools by cumulative screen/total ratio."""
+    """Interleave newest pools by cumulative screen/total ratio up to horizon."""
     vi = ai = 0
     screen = float(screen0)
     total = float(total0)
     out: list[dict] = []
+    planned_sec = 0.0
+    limit_sec = horizon_hours * 3600.0
+
     while vi < len(video_pool) or ai < len(audio_pool):
+        if planned_sec >= limit_sec:
+            break
         want_video = (total <= 0) or (screen / total < ratio)
         if want_video and vi < len(video_pool):
             item = video_pool[vi]
@@ -304,11 +310,14 @@ def plan_playlist(
             d = float(item.get("duration") or 0)
             screen += d
             total += d
+            planned_sec += d
         elif ai < len(audio_pool):
             item = audio_pool[ai]
             ai += 1
             out.append(item)
-            total += float(item.get("duration") or 0)
+            d = float(item.get("duration") or 0)
+            total += d
+            planned_sec += d
         elif vi < len(video_pool):
             item = video_pool[vi]
             vi += 1
@@ -316,6 +325,7 @@ def plan_playlist(
             d = float(item.get("duration") or 0)
             screen += d
             total += d
+            planned_sec += d
         else:
             break
     return out
@@ -396,13 +406,6 @@ class StreamPlugin(Plugin):
     def _ratio(self) -> float:
         return max(0.01, min(0.99, self.screen_minutes_per_hour / 60.0))
 
-    def _video_budget_sec(self) -> float:
-        return self.playlist_horizon_hours * self.screen_minutes_per_hour * 60.0
-
-    def _audio_budget_sec(self) -> float:
-        audio_min = max(0.0, 60.0 - self.screen_minutes_per_hour)
-        return self.playlist_horizon_hours * audio_min * 60.0
-
     def _past_stop_time(self) -> bool:
         now = datetime.now().time()
         if self.stop_time.hour < 6:
@@ -448,14 +451,13 @@ class StreamPlugin(Plugin):
     def _build_preview_playlist(self) -> list[dict]:
         """Live preview from latest cache (as if starting a fresh session). Does not mutate play state."""
         v_pool, a_pool = self._build_pools()
-        return plan_playlist(v_pool, a_pool, 0.0, 0.0, self._ratio())
+        return plan_playlist(v_pool, a_pool, 0.0, 0.0, self._ratio(), self.playlist_horizon_hours)
 
     def _build_pools(self) -> tuple[list[dict], list[dict]]:
         """Newest-first pools sized by horizon budgets. No play-history dedup."""
         max_v = self.max_video_minutes * 60
         max_a = self.max_audio_minutes * 60
-        v_budget = self._video_budget_sec()
-        a_budget = self._audio_budget_sec()
+        horizon_sec = self.playlist_horizon_hours * 3600.0
 
         videos: list[dict] = []
         for handle, enabled in self.channel_enabled.items():
@@ -502,7 +504,7 @@ class StreamPlugin(Plugin):
         for it in uniq_v:
             video_pool.append(it)
             acc += it["duration"]
-            if acc >= v_budget:
+            if acc >= horizon_sec:
                 break
 
         audio_pool: list[dict] = []
@@ -510,7 +512,7 @@ class StreamPlugin(Plugin):
         for it in uniq_a:
             audio_pool.append(it)
             acc += it["duration"]
-            if acc >= a_budget:
+            if acc >= horizon_sec:
                 break
 
         return video_pool, audio_pool
@@ -526,6 +528,7 @@ class StreamPlugin(Plugin):
             self.screen_played_sec,
             self.total_played_sec,
             self._ratio(),
+            self.playlist_horizon_hours,
         )
         self.playlist = planned
         self.current_index = 0 if planned else -1
@@ -535,28 +538,10 @@ class StreamPlugin(Plugin):
         return bool(planned)
 
     def _ensure_mixed_playlist_locked(self) -> bool:
-        """Ensure we have something to play; replan when list ends or one kind runs out.
-
-        If remaining is missing video or audio while cache still has that kind, rebuild
-        so we do not stream only one type for a long tail.
-        """
+        """Ensure we have something to play; replan only when the list ends."""
         if self.current_index < 0 or self.current_index >= len(self.playlist):
             return self._replan_locked()
-
-        rest = self.playlist[self.current_index :]
-        has_v = any(x.get("kind") == "video" for x in rest)
-        has_a = any(x.get("kind") == "audio" for x in rest)
-        if has_v and has_a:
-            return True
-
-        v_pool, a_pool = self._build_pools()
-        need_replan = (not has_v and len(v_pool) > 0) or (not has_a and len(a_pool) > 0)
-        if not need_replan and (v_pool or a_pool) and not rest:
-            need_replan = True
-        if need_replan:
-            return self._replan_locked()
-
-        return bool(rest)
+        return True
 
     def _yt_feed_loop(self):
         """Background YT channel fetch — independent of podcast loop."""
