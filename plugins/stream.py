@@ -166,7 +166,83 @@ def _validate_feed(url: str) -> dict:
 
 
 ITUNES_NS = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
+NAMESPACES = {
+    "itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd",
+    "media": "http://search.yahoo.com/mrss/",
+}
+_IMAGE_VALIDATION_CACHE = {}  # url -> bool
 TARGET_LOUDNESS = -16.0
+
+
+def _is_image_by_path(url: str) -> bool:
+    from urllib.parse import urlparse
+    try:
+        path = urlparse(url).path.lower()
+        return any(path.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif"])
+    except Exception:
+        return False
+
+
+def _validate_image_url(url: str) -> bool:
+    url = (url or "").strip()
+    if not url:
+        return False
+    if url in _IMAGE_VALIDATION_CACHE:
+        return _IMAGE_VALIDATION_CACHE[url]
+
+    is_valid = False
+    head_succeeded_but_rejected = False
+    try:
+        r = requests.head(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        if 200 <= r.status_code < 400:
+            ctype = (r.headers.get("content-type") or "").lower()
+            if ctype.startswith("image/"):
+                is_valid = True
+            elif ctype.startswith("text/"):
+                head_succeeded_but_rejected = True
+            elif _is_image_by_path(url):
+                is_valid = True
+
+        if not is_valid and not head_succeeded_but_rejected:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5, stream=True)
+            if r.status_code == 200:
+                ctype = (r.headers.get("content-type") or "").lower()
+                if ctype.startswith("image/"):
+                    is_valid = True
+                elif not ctype.startswith("text/") and _is_image_by_path(url):
+                    is_valid = True
+    except Exception:
+        is_valid = False
+
+    _IMAGE_VALIDATION_CACHE[url] = is_valid
+    return is_valid
+
+
+def _extract_images(el) -> list[str]:
+    urls = []
+    for img in el.findall("itunes:image", NAMESPACES):
+        href = (img.get("href") or "").strip()
+        if href:
+            urls.append(href)
+
+    for img in el.findall("image"):
+        url = (img.findtext("url") or "").strip()
+        if url:
+            urls.append(url)
+
+    for img in el.findall("media:thumbnail", NAMESPACES):
+        url = (img.get("url") or "").strip()
+        if url:
+            urls.append(url)
+
+    for img in el.findall("media:content", NAMESPACES):
+        url = (img.get("url") or "").strip()
+        medium = (img.get("medium") or "").lower()
+        mtype = (img.get("type") or "").lower()
+        if url and (medium == "image" or mtype.startswith("image/")):
+            urls.append(url)
+
+    return urls
 
 
 def _measure_loudness(url: str) -> float:
@@ -212,6 +288,15 @@ def _fetch_feed(feed_name: str, feed_url: str, keep: int) -> list[dict]:
     root = ET.fromstring(r.content)
     ch = root.find("channel")
     items = ch.findall("item")
+
+    # 1. Resolve channel-level cover image
+    channel_image = ""
+    channel_candidates = _extract_images(ch)
+    for url in channel_candidates:
+        if _validate_image_url(url):
+            channel_image = url
+            break
+
     result = []
     for item in items:
         title = item.findtext("title", "Untitled")
@@ -227,7 +312,7 @@ def _fetch_feed(feed_name: str, feed_url: str, keep: int) -> list[dict]:
             try:
                 dt = parsedate_to_datetime(pub_raw)
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
+                    dt = dt.replace(timezone.utc)
                 pub_ts = int(dt.timestamp())
             except Exception:
                 pass
@@ -236,6 +321,17 @@ def _fetch_feed(feed_name: str, feed_url: str, keep: int) -> list[dict]:
         )
         dur = _parse_duration(dur_raw) if dur_raw else 0
         link = item.findtext("link", "")
+
+        # 2. Resolve episode-specific cover image
+        episode_image = ""
+        episode_candidates = _extract_images(item)
+        for url in episode_candidates:
+            if _validate_image_url(url):
+                episode_image = url
+                break
+
+        image_url = episode_image or channel_image
+
         result.append(
             {
                 "title": title,
@@ -245,6 +341,7 @@ def _fetch_feed(feed_name: str, feed_url: str, keep: int) -> list[dict]:
                 "feed_name": feed_name,
                 "feed_url": feed_url,
                 "link": link,
+                "image_url": image_url,
             }
         )
     result.sort(key=lambda e: e["published"], reverse=True)
@@ -280,6 +377,7 @@ def _normalize_audio(e: dict) -> dict:
         "play_url": url,
         "link": e.get("link") or "",
         "gain_db": e.get("gain_db", 0.0),
+        "image_url": e.get("image_url") or "",
     }
 
 
@@ -700,7 +798,12 @@ class StreamPlugin(Plugin):
                                    attempt + 1, max_attempts, self.current_index,
                                    item.get("title"), gain_db)
                     mc = cast.media_controller
-                    mc.play_media(url, "audio/mpeg")
+                    mc.play_media(
+                        url,
+                        "audio/mpeg",
+                        title=item.get("title") or "",
+                        thumb=item.get("image_url") or "",
+                    )
                     self.log.info("play_media(audio, ct=audio/mpeg, url_len=%d)", len(url))
                     with self._lock:
                         self._play_start = time.time()
