@@ -1,20 +1,19 @@
 # KidDeck
 
-Plugin-based controller for kids' media. Audio stories, YouTube casting, alarms — all from your phone browser.
+Plugin-based controller for kids' media. Audio stories, mixed video/podcast streaming, alarms — all from your phone browser.
 
 ## Features
 
 - **Audio Player** — Stream PCM audio to the camera via SSH. Plays story series (shuffled or selected). Volume control, auto-stop schedule.
 - **Alarm** — Schedule alarms that play audio at set times, with day-of-week selection. Android-style toggle switch UI.
-- **YouTube TV** — Cast curated YouTube videos to a Chromecast/Google TV device. Channel toggles, auto-skip unavailable videos, auto-stop timer, queue management.
-- **Podcasts** — RSS podcast feeds cast to Chromecast as audio. Add/remove/toggle feeds from UI, top-20 queue by publish date, auto-advance through episodes.
+- **Stream** — Mixed YouTube video + RSS podcast playback on Chromecast. Smart playlist interleaves videos and audio by screen-time ratio, volume normalization with ffmpeg gain, cover art metadata, auto-advance, auto-stop at bedtime.
 
 ## Requirements
 
 - Python 3.10+
 - `ffmpeg` on PATH (audio-to-PCM conversion)
 - Thingino IP camera with `play` (SoX) via SSH — for Audio Player and Alarm
-- Chromecast/Google TV on the same network — for YouTube TV and Podcasts
+- Chromecast/Google TV on the same network — for Stream tab
 - [Deno](https://deno.land) — for reliable YouTube video extraction (`curl -fsSL https://deno.land/install.sh | sh`)
 
 ## Setup
@@ -34,9 +33,14 @@ cp config.yaml.example config.yaml
 | `camera` | `user` | Camera SSH user (default: `root`) |
 | `audio_player` | `folder` | Path to story series directories |
 | `audio_player.schedule` | `stop_time` | Auto-stop time (24h format, e.g. `23:00`) |
-| `yt_cast` | `channel_enabled` | Dict of YouTube channel handle → enabled (true/false) |
-| `yt_cast` | `uncast_duration` | Auto-stop casting after N minutes (0 = disabled) |
-| `podcast_player` | `feeds` | Dict of feed name → `{url, enabled}` |
+| `stream` | `screen_minutes_per_hour` | Target screen time per hour (1–60, default `12`) |
+| `stream` | `max_video_minutes` | Drop videos longer than this (default `30`) |
+| `stream` | `max_audio_minutes` | Drop podcasts longer than this (default `30`) |
+| `stream` | `playlist_horizon_hours` | Playlist duration budget (default `3.5`) |
+| `stream` | `channel_enabled` | YouTube channel handle → enabled (true/false) |
+| `stream` | `feeds` | Feed name → `{url, enabled}` |
+| `stream.schedule` | `stop_time` | Auto-stop bedtime (24h, e.g. `21:00`) |
+| `stream` | `outro_video_url` | YouTube URL played at stop time before exiting |
 
 ## Usage
 
@@ -76,8 +80,7 @@ Each plugin is a self-contained `.py` file in `plugins/` that exports a `Plugin`
 Built-in plugins:
 - `audio_player.py` (order 0) — Audio streaming and series playback
 - `alarm.py` (order 1) — Scheduled alarms with volume control
-- `yt_cast.py` (order 2) — YouTube Chromecast controller
-- `podcast_player.py` (order 3) — RSS podcast Chromecast controller
+- `stream.py` (order 4) — Mixed YouTube + podcast Chromecast streaming
 
 ## Restart
 
