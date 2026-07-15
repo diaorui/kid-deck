@@ -41,8 +41,7 @@ def setup_logging(cfg: dict):
     root.addHandler(fh)
     root.addHandler(ch)
 
-    for name in ("controller", "plugin.stream", "plugin.yt_cast",
-                  "plugin.podcast_player", "plugin.audio_player", "plugin.alarm"):
+    for name in ("controller", "plugin.stream", "plugin.audio_player", "plugin.alarm"):
         logging.getLogger(name).setLevel(level)
 
     return logging.getLogger("controller")
