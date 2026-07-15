@@ -912,7 +912,7 @@ class StreamPlugin(Plugin):
                         if (
                             state == "IDLE"
                             and prev_state in ("PLAYING", "BUFFERING")
-                            and idle_reason == "FINISHED"
+                            and idle_reason in ("FINISHED", "ERROR")
                         ):
                             should_next = True
 

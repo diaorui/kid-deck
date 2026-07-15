@@ -331,7 +331,7 @@ class PodcastPlugin(Plugin):
                 should_play_next = False
                 with self._lock:
                     if self.status == "playing":
-                        if state == "IDLE" and prev_state in ("PLAYING", "BUFFERING") and idle_reason == "FINISHED":
+                        if state == "IDLE" and prev_state in ("PLAYING", "BUFFERING") and idle_reason in ("FINISHED", "ERROR"):
                             next_idx = self.current_index + 1
                             if next_idx < len(self.queue):
                                 self.current_index = next_idx
