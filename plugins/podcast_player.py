@@ -17,14 +17,29 @@ from plugins import Plugin
 
 
 def _parse_duration(raw: str) -> int:
-    raw = raw.strip()
+    raw = (raw or "").strip()
+    if not raw:
+        return 0
+    if "." in raw and ":" not in raw:
+        try:
+            return int(float(raw))
+        except ValueError:
+            pass
     if raw.isdigit():
         return int(raw)
     parts = raw.split(":")
-    if len(parts) == 2:
-        return int(parts[0]) * 60 + int(parts[1])
-    if len(parts) == 3:
-        return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+    if parts and "." in parts[-1]:
+        try:
+            parts[-1] = str(int(float(parts[-1])))
+        except ValueError:
+            pass
+    try:
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + int(parts[1])
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+    except ValueError:
+        pass
     return 0
 
 
