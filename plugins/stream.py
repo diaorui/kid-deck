@@ -260,6 +260,14 @@ def _extract_images(el) -> list[str]:
     return urls
 
 
+def _clean_cast_title(title: str) -> str:
+    import unicodedata
+    return "".join(
+        c for c in title
+        if unicodedata.category(c) != "So" and ord(c) <= 0xFFFF
+    ).strip()
+
+
 def _measure_loudness(url: str) -> float:
     """Analyze first 60s of audio with ffmpeg loudnorm, return gain_db to hit TARGET_LOUDNESS.
     Returns 0.0 on failure (safe fallback: no adjustment)."""
@@ -813,12 +821,18 @@ class StreamPlugin(Plugin):
                                    attempt + 1, max_attempts, self.current_index,
                                    item.get("title"), gain_db)
                     mc = cast.media_controller
-                    mc.play_media(
-                        url,
-                        "audio/mpeg",
-                        title=item.get("title") or "",
-                        thumb=item.get("image_url") or "",
-                    )
+                    
+                    audio_title = _clean_cast_title(item.get("title") or "")
+                    audio_source = item.get("source") or ""
+                    metadata = {
+                        "metadataType": 3,
+                        "title": audio_title,
+                        "artist": audio_source,
+                    }
+                    if item.get("image_url"):
+                        metadata["images"] = [{"url": item["image_url"]}]
+
+                    mc.play_media(url, "audio/mpeg", metadata=metadata)
                     self.log.info("play_media(audio, ct=audio/mpeg, url_len=%d)", len(url))
                     with self._lock:
                         self._play_start = time.time()
