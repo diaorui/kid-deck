@@ -912,23 +912,38 @@ class StreamPlugin(Plugin):
         try:
             self._outro_cache_dir.mkdir(parents=True, exist_ok=True)
             part = target.with_suffix(".mp4.part")
-            # If part file leftover from previous crash, remove it
             if part.exists():
                 part.unlink(missing_ok=True)
-            ydl = yt_dlp.YoutubeDL({
-                "format": "22/18",
-                "quiet": True,
-                "outtmpl": str(part),
-                "socket_timeout": 30,
-                "extractor_args": {"youtube": ["player_client=android"]},
-            })
-            ydl.download([f"https://youtube.com/watch?v={vid}"])
+            max_attempts = 3
+            last_exc = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    ydl = yt_dlp.YoutubeDL({
+                        "format": "22/18",
+                        "quiet": True,
+                        "outtmpl": str(part),
+                        "socket_timeout": 30,
+                        "extractor_args": {"youtube": ["player_client=android"]},
+                    })
+                    ydl.download([f"https://youtube.com/watch?v={vid}"])
+                    last_exc = None
+                    break
+                except Exception as e:
+                    last_exc = e
+                    if attempt < max_attempts:
+                        wait = attempt * 5
+                        self.log.info("outro cache retry %d/%d in %ds",
+                                       attempt, max_attempts, wait)
+                        time.sleep(wait)
+            if last_exc:
+                raise last_exc
             part.rename(target)
             self.log.info("outro cache ready: %s (%.1f MB)",
                            target.name, target.stat().st_size / 1024 / 1024)
             return True
         except Exception as e:
-            self.log.warning("outro cache download failed: %s", e)
+            self.log.warning("outro cache download failed after %d attempts: %s",
+                              max_attempts, e)
             if part.exists():
                 part.unlink(missing_ok=True)
             return False
