@@ -503,6 +503,9 @@ class StreamPlugin(Plugin):
         self._play_start: float = 0.0
         self._media_duration_local: int = 0
         self._outro_playing: bool = False
+        self._outro_cache_dir = Path(__file__).resolve().parent.parent / "cache" / "outro"
+        self._outro_cache_dir.mkdir(parents=True, exist_ok=True)
+        self._outro_cache_lock = threading.Lock()
         # Separate ydl instances so YT feed thread and play resolve never share one
         self._ydl = yt_dlp.YoutubeDL(
             {
@@ -895,6 +898,43 @@ class StreamPlugin(Plugin):
             with self._lock:
                 self._do_stop()
 
+    def _ensure_outro_cache(self) -> bool:
+        """Download outro to local cache. Returns True if cache is ready."""
+        vid = parse_youtube_id(self.outro_video_url)
+        if not vid:
+            return False
+        target = self._outro_cache_dir / f"{vid}.mp4"
+        if target.exists():
+            return True
+        if not self._outro_cache_lock.acquire(blocking=False):
+            self.log.debug("outro cache: another download in progress")
+            return False
+        try:
+            self._outro_cache_dir.mkdir(parents=True, exist_ok=True)
+            part = target.with_suffix(".mp4.part")
+            # If part file leftover from previous crash, remove it
+            if part.exists():
+                part.unlink(missing_ok=True)
+            ydl = yt_dlp.YoutubeDL({
+                "format": "22/18",
+                "quiet": True,
+                "outtmpl": str(part),
+                "socket_timeout": 30,
+                "extractor_args": {"youtube": ["player_client=android"]},
+            })
+            ydl.download([f"https://youtube.com/watch?v={vid}"])
+            part.rename(target)
+            self.log.info("outro cache ready: %s (%.1f MB)",
+                           target.name, target.stat().st_size / 1024 / 1024)
+            return True
+        except Exception as e:
+            self.log.warning("outro cache download failed: %s", e)
+            if part.exists():
+                part.unlink(missing_ok=True)
+            return False
+        finally:
+            self._outro_cache_lock.release()
+
     def _start_outro(self) -> str | None:
         """Stop current media (keep cast) and play configured outro video."""
         vid = parse_youtube_id(self.outro_video_url)
@@ -926,6 +966,40 @@ class StreamPlugin(Plugin):
             self.current_index = 0
             self._play_start = 0
             self._media_duration_local = 0
+
+        # Prefer local cache — avoids yt-dlp URL stability issues
+        local_path = self._outro_cache_dir / f"{vid}.mp4"
+        if local_path.exists():
+            local_ip = _local_ip()
+            if local_ip:
+                port = self.controller.config.get("server", {}).get("port", 8080)
+                url = f"http://{local_ip}:{port}/api/stream/outro_video"
+                try:
+                    info = self._ydl_play.extract_info(
+                        f"https://youtube.com/watch?v={vid}", download=False
+                    )
+                    title = info.get("title") or "Goodnight"
+                    dur = int(info.get("duration") or 0)
+                except Exception:
+                    title, dur = "Goodnight", 0
+                cast.media_controller.play_media(url, "video/mp4")
+                with self._lock:
+                    if self.playlist:
+                        self.playlist[0]["duration"] = dur
+                        self.playlist[0]["title"] = title
+                        self.playlist[0]["play_url"] = url
+                    self._play_start = time.time()
+                    self._media_duration_local = dur
+                    self._outro_playing = True
+                    self.status = "ending"
+                self.log.info("outro playing (cached) — %s (%ds)", title, dur)
+                return None
+            else:
+                self.log.warning("no LAN IP, fallback to streaming")
+        else:
+            self.log.info("outro cache not ready, streaming instead")
+
+        # Fallback: stream via yt-dlp (may fail for transient formats)
         try:
             info = self._ydl_play.extract_info(
                 f"https://youtube.com/watch?v={vid}", download=False
@@ -945,7 +1019,7 @@ class StreamPlugin(Plugin):
                 self._media_duration_local = dur
                 self._outro_playing = True
                 self.status = "ending"
-            self.log.info("outro playing — %s (%ds)", title, dur)
+            self.log.info("outro playing (streamed) — %s (%ds)", title, dur)
             return None
         except Exception as e:
             return str(e)
@@ -1207,7 +1281,20 @@ class StreamPlugin(Plugin):
                 self.log.error("/play failed: %s", err)
                 return {"ok": False, "error": err}
             self.log.info("/play OK")
+            # Background download outro for bedtime
+            threading.Thread(target=self._ensure_outro_cache, daemon=True).start()
             return {"ok": True}
+
+        @self.router.get("/outro_video")
+        async def serve_outro_video():
+            from fastapi.responses import FileResponse, Response
+            vid = parse_youtube_id(self.outro_video_url)
+            if not vid:
+                return Response(status_code=404)
+            path = self._outro_cache_dir / f"{vid}.mp4"
+            if not path.exists():
+                return Response(status_code=404)
+            return FileResponse(str(path), media_type="video/mp4")
 
         @self.router.post("/stop")
         async def stop_route():
@@ -1287,7 +1374,14 @@ class StreamPlugin(Plugin):
                     v = float(data["playlist_horizon_hours"])
                     self.playlist_horizon_hours = max(0.5, min(24.0, v))
                 if "outro_video_url" in data:
-                    self.outro_video_url = str(data.get("outro_video_url") or "").strip()
+                    new_url = str(data.get("outro_video_url") or "").strip()
+                    old_vid = parse_youtube_id(self.outro_video_url)
+                    new_vid = parse_youtube_id(new_url)
+                    if old_vid != new_vid:
+                        import shutil
+                        shutil.rmtree(self._outro_cache_dir, ignore_errors=True)
+                        self._outro_cache_dir.mkdir(parents=True, exist_ok=True)
+                    self.outro_video_url = new_url
             self._save_config()
             with self._lock:
                 return {
