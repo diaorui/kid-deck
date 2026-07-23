@@ -525,7 +525,8 @@ class StreamPlugin(Plugin):
         self._download_executor = ThreadPoolExecutor(max_workers=2)
         self._downloading_keys: set[str] = set()
         self._cache_lock = threading.Lock()
-        self._refresh_count = 0
+        self._yt_refresh_count = 0
+        self._pc_refresh_count = 0
         # Separate ydl instances so YT feed thread and play resolve never share one
         self._ydl = yt_dlp.YoutubeDL(
             {
@@ -571,7 +572,10 @@ class StreamPlugin(Plugin):
             return False
         try:
             m = json.loads(meta.read_text())
-            return path.stat().st_size == m.get("size")
+            expected = m.get("size", 0)
+            if expected == 0:
+                return False
+            return abs(path.stat().st_size - expected) <= 1024
         except Exception:
             return False
 
@@ -609,6 +613,7 @@ class StreamPlugin(Plugin):
             actual_size = 0
             for attempt in range(1, 4):
                 try:
+                    check_size = expected_size
                     if kind == "v":
                         ydl = yt_dlp.YoutubeDL({
                             "format": "22/18",
@@ -620,13 +625,16 @@ class StreamPlugin(Plugin):
                         ydl.download([url])
                     else:
                         r = requests.get(url, stream=True, timeout=30)
+                        cl = int(r.headers.get("content-length", 0))
+                        if cl > 0:
+                            check_size = cl
                         with open(part, "wb") as f:
                             for chunk in r.iter_content(8192):
                                 if chunk:
                                     f.write(chunk)
                     actual_size = part.stat().st_size
-                    if expected_size > 0:
-                        if actual_size == expected_size:
+                    if check_size > 0:
+                        if abs(actual_size - check_size) <= 1024:
                             break
                     elif kind == "v":
                         if actual_size >= 500 * 1024:
@@ -634,7 +642,7 @@ class StreamPlugin(Plugin):
                     else:
                         if actual_size >= 100 * 1024:
                             break
-                    raise ValueError(f"size mismatch: got {actual_size}, expected {expected_size}")
+                    raise ValueError(f"size mismatch: got {actual_size}, expected {check_size}")
                 except Exception:
                     _unlink(part)
                     if attempt < 3:
@@ -655,6 +663,8 @@ class StreamPlugin(Plugin):
                 self._downloading_keys.discard(key)
 
     def _cleanup_cache(self):
+        if self.max_age_days <= 0:
+            return
         cutoff = time.time() - self.max_age_days * 86400
         for meta in self._cache_dir.rglob("*.meta"):
             try:
@@ -701,6 +711,8 @@ class StreamPlugin(Plugin):
                 "yt_fetch_per_channel": self.yt_fetch_per_channel,
                 "podcast_keep_per_feed": self.podcast_keep_per_feed,
                 "feed_interval": self.feed_interval,
+                "max_items_per_feed": self.max_items_per_feed,
+                "max_age_days": self.max_age_days,
                 "schedule": {
                     "stop_time": self.stop_time.strftime("%H:%M"),
                 },
@@ -860,8 +872,8 @@ class StreamPlugin(Plugin):
                 delay = 0.5 if first_pass else self.feed_interval
                 self._feed_stop_event.wait(delay)
             with self._lock:
-                self._refresh_count += 1
-                do_cleanup = self._refresh_count % 5 == 0
+                self._yt_refresh_count += 1
+                do_cleanup = self._yt_refresh_count % 5 == 0
             if do_cleanup:
                 self._cleanup_cache()
             first_pass = False
@@ -905,6 +917,11 @@ class StreamPlugin(Plugin):
                     self.log.warning("podcast feed: failed %s: %s", feed_name, e)
                 delay = 0.5 if first_pass else self.feed_interval
                 self._feed_stop_event.wait(delay)
+            with self._lock:
+                self._pc_refresh_count += 1
+                do_cleanup = self._pc_refresh_count % 5 == 0
+            if do_cleanup:
+                self._cleanup_cache()
             first_pass = False
 
     def _discover(self) -> pychromecast.Chromecast | None:
