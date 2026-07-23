@@ -7,8 +7,10 @@ import subprocess
 import threading
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time as dtime, timezone
 from email.utils import parsedate_to_datetime
+from hashlib import md5
 from pathlib import Path
 from urllib.parse import quote
 
@@ -339,6 +341,7 @@ def _fetch_feed(feed_name: str, feed_url: str, keep: int) -> list[dict]:
                 pub_ts = int(dt.timestamp())
             except Exception:
                 pass
+        guid = item.findtext("guid", "")
         dur_raw = item.findtext("duration", "") or item.findtext(
             "itunes:duration", "", ITUNES_NS
         )
@@ -365,6 +368,7 @@ def _fetch_feed(feed_name: str, feed_url: str, keep: int) -> list[dict]:
                 "feed_url": feed_url,
                 "link": link,
                 "image_url": image_url,
+                "guid": guid,
             }
         )
     result.sort(key=lambda e: e["published"], reverse=True)
@@ -390,8 +394,10 @@ def _normalize_video(v: dict) -> dict:
 
 def _normalize_audio(e: dict) -> dict:
     url = e.get("url") or ""
+    guid = e.get("guid") or ""
+    cache_key = md5((guid or url).encode()).hexdigest()
     return {
-        "id": f"a:{url}",
+        "id": f"a:{cache_key}",
         "kind": "audio",
         "title": e.get("title") or "",
         "published": int(e.get("published") or 0),
@@ -401,7 +407,13 @@ def _normalize_audio(e: dict) -> dict:
         "link": e.get("link") or "",
         "gain_db": e.get("gain_db", 0.0),
         "image_url": e.get("image_url") or "",
+        "guid": guid,
+        "_cache_key": cache_key,
     }
+
+
+def _unlink(p: Path):
+    p.unlink(missing_ok=True)
 
 
 def plan_playlist(
@@ -472,6 +484,8 @@ class StreamPlugin(Plugin):
         self.yt_fetch_per_channel: int = int(config.get("yt_fetch_per_channel", 8))
         self.podcast_keep_per_feed: int = int(config.get("podcast_keep_per_feed", 10))
         self.feed_interval: int = int(config.get("feed_interval", 60))
+        self.max_items_per_feed: int = int(config.get("max_items_per_feed", 5))
+        self.max_age_days: int = int(config.get("max_age_days", 5))
 
         sched = config.get("schedule") or {}
         self.stop_time = parse_time(sched.get("stop_time", "21:00"))
@@ -506,6 +520,12 @@ class StreamPlugin(Plugin):
         self._outro_cache_dir = Path(__file__).resolve().parent.parent / "cache" / "outro"
         self._outro_cache_dir.mkdir(parents=True, exist_ok=True)
         self._outro_cache_lock = threading.Lock()
+        self._cache_dir = Path(__file__).resolve().parent.parent / "cache" / "media"
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        self._download_executor = ThreadPoolExecutor(max_workers=2)
+        self._downloading_keys: set[str] = set()
+        self._cache_lock = threading.Lock()
+        self._refresh_count = 0
         # Separate ydl instances so YT feed thread and play resolve never share one
         self._ydl = yt_dlp.YoutubeDL(
             {
@@ -529,6 +549,130 @@ class StreamPlugin(Plugin):
 
     def _ratio(self) -> float:
         return max(0.01, min(0.99, self.screen_minutes_per_hour / 60.0))
+
+    # ── cache helpers ──────────────────────────────────────────
+
+    def _cache_path(self, kind: str, key: str) -> Path:
+        ext = ".mp4" if kind == "v" else ".mp3"
+        return self._cache_dir / kind / f"{key}{ext}"
+
+    def _cache_http_url(self, kind: str, key: str) -> str:
+        ip = _local_ip()
+        if not ip:
+            return ""
+        port = self.controller.config.get("server", {}).get("port", 8080)
+        return f"http://{ip}:{port}/api/stream/cached_media/{kind}/{key}"
+
+    def _cache_valid(self, path: Path) -> bool:
+        if not path.exists():
+            return False
+        meta = path.with_suffix(".meta")
+        if not meta.exists():
+            return False
+        try:
+            m = json.loads(meta.read_text())
+            return path.stat().st_size == m.get("size")
+        except Exception:
+            return False
+
+    def _select_candidates(self, items: list[dict], kind: str) -> list[dict]:
+        max_dur = (self.max_video_minutes * 60) if kind == "v" else (self.max_audio_minutes * 60)
+        max_age = self.max_age_days * 86400
+        now = time.time()
+        out = []
+        for it in items:
+            dur = int(it.get("duration") or 0)
+            pub = int(it.get("published") or 0)
+            if dur <= 0 or dur > max_dur:
+                continue
+            if max_age > 0 and pub > 0 and now - pub > max_age:
+                continue
+            out.append(it)
+        out.sort(key=lambda x: x.get("published", 0), reverse=True)
+        return out[:self.max_items_per_feed]
+
+    def _audio_cache_key(self, item: dict) -> str:
+        guid = item.get("guid") or ""
+        return md5((guid or item.get("url", "")).encode()).hexdigest()
+
+    def _download_item(self, kind: str, key: str, url: str,
+                       published: int, expected_size: int = 0) -> bool:
+        target = self._cache_path(kind, key)
+        part = target.with_suffix(".part")
+        with self._cache_lock:
+            if key in self._downloading_keys:
+                return False
+            self._downloading_keys.add(key)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _unlink(part)
+            actual_size = 0
+            for attempt in range(1, 4):
+                try:
+                    if kind == "v":
+                        ydl = yt_dlp.YoutubeDL({
+                            "format": "22/18",
+                            "quiet": True,
+                            "outtmpl": str(part),
+                            "socket_timeout": 30,
+                            "extractor_args": {"youtube": ["player_client=android"]},
+                        })
+                        ydl.download([url])
+                    else:
+                        r = requests.get(url, stream=True, timeout=30)
+                        with open(part, "wb") as f:
+                            for chunk in r.iter_content(8192):
+                                if chunk:
+                                    f.write(chunk)
+                    actual_size = part.stat().st_size
+                    if expected_size > 0:
+                        if actual_size == expected_size:
+                            break
+                    elif kind == "v":
+                        if actual_size >= 500 * 1024:
+                            break
+                    else:
+                        if actual_size >= 100 * 1024:
+                            break
+                    raise ValueError(f"size mismatch: got {actual_size}, expected {expected_size}")
+                except Exception:
+                    _unlink(part)
+                    if attempt < 3:
+                        self.log.info("cache retry %d/3 %s/%s in %ds", attempt, kind, key, attempt * 5)
+                        time.sleep(attempt * 5)
+            else:
+                self.log.warning("cache failed after 3 retries: %s/%s", kind, key)
+                return False
+            part.rename(target)
+            target.with_suffix(".meta").write_text(json.dumps({
+                "size": actual_size,
+                "published": published,
+            }))
+            self.log.info("cached %s/%s (%.1f MB)", kind, key, actual_size / 1024 / 1024)
+            return True
+        finally:
+            with self._cache_lock:
+                self._downloading_keys.discard(key)
+
+    def _cleanup_cache(self):
+        cutoff = time.time() - self.max_age_days * 86400
+        for meta in self._cache_dir.rglob("*.meta"):
+            try:
+                pub = json.loads(meta.read_text()).get("published", 0)
+                if pub > 0 and pub < cutoff:
+                    _unlink(meta.with_suffix(".mp4"))
+                    _unlink(meta.with_suffix(".mp3"))
+                    _unlink(meta)
+            except Exception:
+                pass
+        for part in self._cache_dir.rglob("*.part"):
+            try:
+                with self._cache_lock:
+                    busy = part.stem in self._downloading_keys
+                if not busy and time.time() - part.stat().st_mtime > 3600:
+                    _unlink(part)
+            except Exception:
+                pass
 
     def _past_stop_time(self) -> bool:
         now = datetime.now().time()
@@ -578,7 +722,7 @@ class StreamPlugin(Plugin):
         return plan_playlist(v_pool, a_pool, 0.0, 0.0, self._ratio(), self.playlist_horizon_hours)
 
     def _build_pools(self) -> tuple[list[dict], list[dict]]:
-        """Newest-first pools sized by horizon budgets. No play-history dedup."""
+        """Newest-first pools, only items with valid local cache. No play-history dedup."""
         max_v = self.max_video_minutes * 60
         max_a = self.max_audio_minutes * 60
         horizon_sec = self.playlist_horizon_hours * 3600.0
@@ -626,6 +770,14 @@ class StreamPlugin(Plugin):
         video_pool: list[dict] = []
         acc = 0.0
         for it in uniq_v:
+            vid = it["video_id"]
+            path = self._cache_path("v", vid)
+            if not self._cache_valid(path):
+                continue
+            url = self._cache_http_url("v", vid)
+            if not url:
+                continue
+            it["play_url"] = url
             video_pool.append(it)
             acc += it["duration"]
             if acc >= horizon_sec:
@@ -634,6 +786,16 @@ class StreamPlugin(Plugin):
         audio_pool: list[dict] = []
         acc = 0.0
         for it in uniq_a:
+            ck = it.get("_cache_key", "")
+            if not ck:
+                continue
+            path = self._cache_path("a", ck)
+            if not self._cache_valid(path):
+                continue
+            url = self._cache_http_url("a", ck)
+            if not url:
+                continue
+            it["play_url"] = url
             audio_pool.append(it)
             acc += it["duration"]
             if acc >= horizon_sec:
@@ -682,10 +844,26 @@ class StreamPlugin(Plugin):
                     videos = _fetch_channel_videos(handle, self._ydl)
                     with self._lock:
                         self._yt_cache[handle] = videos
+                    for v in self._select_candidates(videos, "v"):
+                        vid = v.get("video_id") or ""
+                        if not vid:
+                            continue
+                        path = self._cache_path("v", vid)
+                        if self._cache_valid(path):
+                            continue
+                        pub = int(v.get("published") or v.get("timestamp") or time.time())
+                        self._download_executor.submit(
+                            self._download_item, "v", vid,
+                            f"https://youtube.com/watch?v={vid}", pub)
                 except Exception as e:
                     self.log.warning("YT feed: failed %s: %s", handle, e)
                 delay = 0.5 if first_pass else self.feed_interval
                 self._feed_stop_event.wait(delay)
+            with self._lock:
+                self._refresh_count += 1
+                do_cleanup = self._refresh_count % 5 == 0
+            if do_cleanup:
+                self._cleanup_cache()
             first_pass = False
 
     def _pc_feed_loop(self):
@@ -703,11 +881,22 @@ class StreamPlugin(Plugin):
                     episodes = _fetch_feed(
                         feed_name, info["url"], self.podcast_keep_per_feed
                     )
+                    for ep in self._select_candidates(episodes, "a"):
+                        ck = self._audio_cache_key(ep)
+                        path = self._cache_path("a", ck)
+                        if self._cache_valid(path):
+                            continue
+                        pub = int(ep.get("published") or time.time())
+                        self._download_executor.submit(
+                            self._download_item, "a", ck,
+                            ep.get("url", ""), pub, 0)
                     for ep in episodes:
-                        if ep.get("duration", 0) >= 60:
-                            if ep["url"] not in self._gain_cache:
-                                self._gain_cache[ep["url"]] = _measure_loudness(ep["url"])
-                            ep["gain_db"] = self._gain_cache[ep["url"]]
+                        ck = self._audio_cache_key(ep)
+                        path = self._cache_path("a", ck)
+                        if ep.get("duration", 0) >= 60 and path.exists():
+                            if ck not in self._gain_cache:
+                                self._gain_cache[ck] = _measure_loudness(str(path))
+                            ep["gain_db"] = self._gain_cache[ck]
                         else:
                             ep["gain_db"] = 0.0
                     with self._lock:
@@ -770,41 +959,19 @@ class StreamPlugin(Plugin):
                 return "not connected"
             try:
                 if item.get("kind") == "video":
-                    video_id = item.get("video_id") or ""
-                    self.log.info("attempt %d/%d idx=%d id=%s title=%s kind=video",
-                                   attempt + 1, max_attempts, self.current_index,
-                                   video_id, item.get("title"))
-                    info = self._ydl_play.extract_info(
-                        f"https://youtube.com/watch?v={video_id}", download=False
-                    )
-                    url = info.get("url") or item.get("play_url")
-                    dur = int(info.get("duration") or item.get("duration") or 0)
+                    url = item.get("play_url") or ""
                     if not url:
-                        self.log.warning("resolve %s returned no url, fallback to feed url",
-                                          video_id)
-                        url = item.get("play_url") or ""
-                    if not url:
-                        raise RuntimeError(f"could not resolve URL for {video_id}")
-                    ext = info.get("ext", "?")
-                    fmt_id = info.get("format_id", "?")
-                    proto = info.get("protocol", "?")
-                    has_manifest = "manifest_url" in info or "manifest" in str(info.get("url", ""))
-                    self.log.info("resolve OK url_len=%d dur=%d ext=%s fmt=%s proto=%s manifest=%s url=%s",
-                                   len(url), dur, ext, fmt_id, proto, has_manifest, url)
-                    with self._lock:
-                        if self.current_index < len(self.playlist):
-                            self.playlist[self.current_index]["duration"] = dur
-                            self.playlist[self.current_index]["play_url"] = url
+                        raise RuntimeError("missing video play_url")
+                    dur = int(item.get("duration") or 0)
                     mc = cast.media_controller
                     mc.play_media(url, "video/mp4")
-                    self.log.info("play_media(video, ct=video/mp4, url_len=%d)", len(url))
+                    self.log.info("playing video [%d/%d] %s (cached, url_len=%d)",
+                                   self.current_index + 1, len(self.playlist),
+                                   item.get("title"), len(url))
                     with self._lock:
                         self._play_start = time.time()
                         self._media_duration_local = dur
                         self.status = "playing"
-                    self.log.info("playing video [%d/%d] %s",
-                                   self.current_index + 1, len(self.playlist),
-                                   item.get("title"))
                     return None
                 else:
                     url = item.get("play_url") or ""
@@ -1169,6 +1336,8 @@ class StreamPlugin(Plugin):
     def start(self):
         super().start()
         self._feed_stop_event.clear()
+        for p in self._cache_dir.rglob("*.part"):
+            _unlink(p)
         self._yt_feed_thread = threading.Thread(target=self._yt_feed_loop, daemon=True)
         self._pc_feed_thread = threading.Thread(target=self._pc_feed_loop, daemon=True)
         self._yt_feed_thread.start()
@@ -1296,7 +1465,7 @@ class StreamPlugin(Plugin):
                 self.log.error("/play failed: %s", err)
                 return {"ok": False, "error": err}
             self.log.info("/play OK")
-            # Background download outro for bedtime
+            self._cleanup_cache()
             threading.Thread(target=self._ensure_outro_cache, daemon=True).start()
             return {"ok": True}
 
@@ -1310,6 +1479,17 @@ class StreamPlugin(Plugin):
             if not path.exists():
                 return Response(status_code=404)
             return FileResponse(str(path), media_type="video/mp4")
+
+        @self.router.get("/cached_media/{kind}/{key}")
+        async def serve_cached_media(kind: str, key: str):
+            from fastapi.responses import FileResponse, Response
+            if kind not in ("v", "a"):
+                return Response(status_code=404)
+            path = self._cache_path(kind, key)
+            if not path.exists():
+                return Response(status_code=404)
+            ct = "video/mp4" if kind == "v" else "audio/mpeg"
+            return FileResponse(str(path), media_type=ct)
 
         @self.router.post("/stop")
         async def stop_route():

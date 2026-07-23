@@ -33,6 +33,8 @@ plugins:
     yt_fetch_per_channel: 8
     podcast_keep_per_feed: 10
     feed_interval: 60
+    max_items_per_feed: 5          # Max cached items per channel/feed
+    max_age_days: 5                # Delete cached items older than this
     schedule:
       stop_time: "21:00"          # Clock time auto-stop (like audio_player)
     outro_video_url: ""           # YouTube URL/id played at stop_time, then full exit (empty = hard stop)
