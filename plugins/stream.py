@@ -615,14 +615,17 @@ class StreamPlugin(Plugin):
                 try:
                     check_size = expected_size
                     if kind == "v":
+                        # yt-dlp appends ext to outtmpl. Strip suffix so it writes to target:
+                        # outtmpl="/path/vid" → actual="/path/vid.mp4" = target
                         ydl = yt_dlp.YoutubeDL({
                             "format": "22/18",
                             "quiet": True,
-                            "outtmpl": str(part),
+                            "outtmpl": str(target.with_suffix("")),
                             "socket_timeout": 30,
                             "extractor_args": {"youtube": ["player_client=android"]},
                         })
                         ydl.download([url])
+                        actual_size = target.stat().st_size
                     else:
                         r = requests.get(url, stream=True, timeout=30)
                         cl = int(r.headers.get("content-length", 0))
@@ -632,7 +635,7 @@ class StreamPlugin(Plugin):
                             for chunk in r.iter_content(8192):
                                 if chunk:
                                     f.write(chunk)
-                    actual_size = part.stat().st_size
+                        actual_size = part.stat().st_size
                     if check_size > 0:
                         if abs(actual_size - check_size) <= 1024:
                             break
@@ -644,14 +647,16 @@ class StreamPlugin(Plugin):
                             break
                     raise ValueError(f"size mismatch: got {actual_size}, expected {check_size}")
                 except Exception:
-                    _unlink(part)
+                    if kind != "v":
+                        _unlink(part)
                     if attempt < 3:
                         self.log.info("cache retry %d/3 %s/%s in %ds", attempt, kind, key, attempt * 5)
                         time.sleep(attempt * 5)
             else:
                 self.log.warning("cache failed after 3 retries: %s/%s", kind, key)
                 return False
-            part.rename(target)
+            if kind != "v":
+                part.rename(target)
             target.with_suffix(".meta").write_text(json.dumps({
                 "size": actual_size,
                 "published": published,
