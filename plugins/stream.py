@@ -615,16 +615,23 @@ class StreamPlugin(Plugin):
                 try:
                     check_size = expected_size
                     if kind == "v":
-                        # yt-dlp appends ext to outtmpl. Strip suffix so it writes to target:
-                        # outtmpl="/path/vid" → actual="/path/vid.mp4" = target
+                        base = str(target.with_suffix(""))
                         ydl = yt_dlp.YoutubeDL({
                             "format": "22/18",
                             "quiet": True,
-                            "outtmpl": str(target.with_suffix("")),
+                            "outtmpl": base + ".%(ext)s",
                             "socket_timeout": 30,
                             "extractor_args": {"youtube": ["player_client=android"]},
                         })
                         ydl.download([url])
+                        if not target.exists():
+                            dl = Path(base)
+                            if not dl.exists():
+                                dl = Path(base + ".")
+                            if dl.exists():
+                                dl.rename(target)
+                            else:
+                                raise FileNotFoundError(f"yt-dlp output not found: {base}")
                         actual_size = target.stat().st_size
                     else:
                         r = requests.get(url, stream=True, timeout=30)
