@@ -390,6 +390,16 @@ class AudioPlayerPlugin(Plugin):
                 self.stop_time = parse_time(time_str)
             return {"ok": True}
 
+        @self.router.post("/restart_camera")
+        async def restart_camera():
+            self.stop_playback()
+            camera = self.controller.camera
+            try:
+                camera.reboot()
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+            return {"ok": True}
+
         app.include_router(self.router)
 
     def ui_section(self) -> str:
@@ -408,6 +418,12 @@ class AudioPlayerPlugin(Plugin):
             <span class="auto-stop-label">Auto-stop</span>
             <span class="auto-stop-value" id="ap-stop-time-display" onclick="apEditStopTime()">--:--</span>
             <input type="time" id="ap-stop-time-input" style="display:none" onchange="apSaveStopTime()">
+          </div>
+
+          <div class="auto-stop-row">
+            <span class="auto-stop-label">Camera</span>
+            <button class="restart-btn" onclick="apRestartCamera()"
+              style="margin:0; padding:6px 14px; font-size:13px">&#x21BB; Restart Camera</button>
           </div>
 
           <details class="collapsible">
@@ -461,6 +477,10 @@ class AudioPlayerPlugin(Plugin):
 "    document.getElementById('ap-stop-time-display').textContent = val;\n"
 "    await apFetch('/api/audio_player/stop_time', { time: val });\n"
 "  }\n"
+"}\n"
+"async function apRestartCamera() {\n"
+"  if (!confirm('Reboot the camera? Audio will stop, camera offline ~1-2 min.')) return;\n"
+"  await apFetch('/api/audio_player/restart_camera');\n"
 "}\n"
             "async function apPoll() {\n"
             "  try {\n"

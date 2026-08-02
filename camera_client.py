@@ -130,6 +130,19 @@ class CameraClient:
         except Exception:
             return False
 
+    def reboot(self):
+        """Reboot camera via SSH. Connection will drop."""
+        client = self._ensure_conn()
+        try:
+            client.exec_command("reboot")
+        except Exception:
+            pass
+        try:
+            self._client.close()
+        except Exception:
+            pass
+        self._client = None
+
     def close(self):
         if self._client is not None:
             try:
