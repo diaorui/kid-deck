@@ -491,6 +491,11 @@ class StreamPlugin(Plugin):
         self.stop_time = parse_time(sched.get("stop_time", "21:00"))
         self.outro_video_url: str = str(config.get("outro_video_url", "") or "")
 
+        auto_start = config.get("auto_start") or {}
+        self.auto_start_enabled: bool = bool(auto_start.get("enabled", False))
+        self.auto_start_time: str = str(auto_start.get("time", "08:00"))
+        self._auto_triggered_today = False
+
         self.channel_enabled: dict[str, bool] = dict(
             config.get("channel_enabled", {})
         )
@@ -513,6 +518,7 @@ class StreamPlugin(Plugin):
         self._gain_cache: dict[str, float] = {}
         self._yt_feed_thread: threading.Thread | None = None
         self._pc_feed_thread: threading.Thread | None = None
+        self._scheduler_thread: threading.Thread | None = None
         self._feed_stop_event = threading.Event()
         self._play_start: float = 0.0
         self._media_duration_local: int = 0
@@ -727,6 +733,10 @@ class StreamPlugin(Plugin):
                 "max_age_days": self.max_age_days,
                 "schedule": {
                     "stop_time": self.stop_time.strftime("%H:%M"),
+                },
+                "auto_start": {
+                    "enabled": self.auto_start_enabled,
+                    "time": self.auto_start_time,
                 },
                 "outro_video_url": self.outro_video_url,
                 "channel_enabled": dict(self.channel_enabled),
@@ -1094,6 +1104,67 @@ class StreamPlugin(Plugin):
             with self._lock:
                 self._do_stop()
 
+    def _scheduler_loop(self):
+        """Every-30s check for auto-start (daily fixed time)."""
+        last_date = datetime.now().date()
+        while self.running:
+            now = datetime.now()
+            if now.date() != last_date:
+                self._auto_triggered_today = False
+                last_date = now.date()
+            if (
+                self.auto_start_enabled
+                and not self._auto_triggered_today
+                and now.strftime("%H:%M") == self.auto_start_time
+            ):
+                self._auto_triggered_today = True
+                self._auto_start()
+            time.sleep(30)
+
+    def _auto_start(self):
+        """Auto-start playback: connect if needed, then play like /play."""
+        if self._past_stop_time():
+            self.log.info("auto-start skipped: past stop time")
+            return
+        with self._lock:
+            if self.status == "playing" or self.status == "ending":
+                self.log.info("auto-start skipped: already playing")
+                return
+        if self._cast is None:
+            self.log.info("auto-start: cast not connected, discovering...")
+            cast = self._discover()
+            if cast is None:
+                self.log.warning("auto-start: no cast device found, skip today")
+                return
+            with self._lock:
+                self._cast = cast
+                self.device_name = cast.name
+                self.status = "connected_idle"
+                self.log.info("auto-start: connected → %s", cast.name)
+        with self._lock:
+            if self.status == "playing":
+                return
+            self.total_played_sec = 0.0
+            self.screen_played_sec = 0.0
+            if not self._replan_locked():
+                self.log.warning("auto-start: empty playlist, skip today")
+                return
+            if self._thread is None or not self._thread.is_alive():
+                self._stop_event.clear()
+                self._thread = threading.Thread(
+                    target=self._monitor_loop, daemon=True
+                )
+                self._thread.start()
+        self.log.info("auto-start: playing (playlist=%d items)", len(self.playlist))
+        err = self._play_current()
+        if err:
+            self.log.error("auto-start play failed: %s", err)
+            with self._lock:
+                self.current_index = -1
+                self.playlist = []
+                if self.status == "playing":
+                    self.status = "connected_idle"
+
     def _ensure_outro_cache(self) -> bool:
         """Download outro to local cache. Returns True if cache is ready."""
         vid = parse_youtube_id(self.outro_video_url)
@@ -1371,6 +1442,10 @@ class StreamPlugin(Plugin):
         self._pc_feed_thread = threading.Thread(target=self._pc_feed_loop, daemon=True)
         self._yt_feed_thread.start()
         self._pc_feed_thread.start()
+        self._scheduler_thread = threading.Thread(
+            target=self._scheduler_loop, daemon=True
+        )
+        self._scheduler_thread.start()
         self.log.info("ready (YT + podcast fetch in parallel)")
 
     def stop(self):
@@ -1424,6 +1499,10 @@ class StreamPlugin(Plugin):
                     },
                     "stop_time": self.stop_time.strftime("%H:%M"),
                     "past_stop_time": self._past_stop_time(),
+                    "auto_start": {
+                        "enabled": self.auto_start_enabled,
+                        "time": self.auto_start_time,
+                    },
                     "outro_video_url": self.outro_video_url,
                     "outro_playing": self._outro_playing,
                     "media_position": elapsed,
@@ -1619,6 +1698,21 @@ class StreamPlugin(Plugin):
                     "outro_video_url": self.outro_video_url,
                 }
 
+        @self.router.post("/auto_start")
+        async def auto_start_route(request: Request):
+            data = await request.json()
+            with self._lock:
+                if "enabled" in data:
+                    self.auto_start_enabled = bool(data["enabled"])
+                if "time" in data and data["time"]:
+                    self.auto_start_time = str(data["time"])
+            self._save_config()
+            return {
+                "ok": True,
+                "enabled": self.auto_start_enabled,
+                "time": self.auto_start_time,
+            }
+
         @self.router.post("/toggle_channel")
         async def toggle_channel(request: Request):
             data = await request.json()
@@ -1735,6 +1829,16 @@ class StreamPlugin(Plugin):
             <span class="auto-stop-label">Auto-stop</span>
             <span class="auto-stop-value" id="st-stop-time-display" onclick="stEditStopTime()">--:--</span>
             <input type="time" id="st-stop-time-input" style="display:none" onchange="stSaveStopTime()">
+          </div>
+
+          <div class="auto-stop-row">
+            <span class="auto-stop-label">Auto-start</span>
+            <span class="auto-stop-value" id="st-auto-start-display" onclick="stEditAutoStart()">--:--</span>
+            <input type="time" id="st-auto-start-input" style="display:none" onchange="stSaveAutoStart()">
+            <label class="switch">
+              <input type="checkbox" id="st-auto-start-toggle" onchange="stSetAutoStartToggle()">
+              <span class="track"><span class="thumb"></span></span>
+            </label>
           </div>
 
           <details class="collapsible" id="st-settings-section">
@@ -1904,6 +2008,21 @@ class StreamPlugin(Plugin):
             document.getElementById('st-stop-time-display').textContent = val;
             await stFetch('/api/stream/stop_time', { time: val });
           }
+        }
+        function stEditAutoStart() {
+          var input = document.getElementById('st-auto-start-input');
+          if (input.showPicker) input.showPicker(); else input.click();
+        }
+        async function stSaveAutoStart() {
+          var val = document.getElementById('st-auto-start-input').value;
+          if (val) {
+            document.getElementById('st-auto-start-display').textContent = val;
+            await stFetch('/api/stream/auto_start', { time: val });
+          }
+        }
+        async function stSetAutoStartToggle() {
+          var on = document.getElementById('st-auto-start-toggle').checked;
+          await stFetch('/api/stream/auto_start', { enabled: on });
         }
         var stParamsFp = '';
         function stFillParams(s) {
@@ -2136,6 +2255,10 @@ class StreamPlugin(Plugin):
             }
             document.getElementById('st-stop-time-display').textContent = s.stop_time || '--:--';
             document.getElementById('st-stop-time-input').value = s.stop_time || '';
+            var stAs = s.auto_start || {};
+            document.getElementById('st-auto-start-display').textContent = stAs.time || '--:--';
+            document.getElementById('st-auto-start-input').value = stAs.time || '';
+            document.getElementById('st-auto-start-toggle').checked = !!stAs.enabled;
             var active = (s.status === 'playing' || s.status === 'ending');
             document.getElementById('st-play-btn').style.display = active ? 'none' : '';
             document.getElementById('st-stop-btn').style.display = active ? '' : 'none';

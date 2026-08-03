@@ -24,6 +24,9 @@ plugins:
     volume: 60
     schedule:
       stop_time: "23:00"
+    auto_start:
+      enabled: false         # Auto-start playback at fixed time daily
+      time: "08:00"
 
   stream:
     screen_minutes_per_hour: 12   # Target visual share of played content
@@ -37,6 +40,9 @@ plugins:
     max_age_days: 5                # Delete cached items older than this
     schedule:
       stop_time: "21:00"          # Clock time auto-stop (like audio_player)
+    auto_start:
+      enabled: false         # Auto-start playback at fixed time daily
+      time: "08:00"
     outro_video_url: ""           # YouTube URL/id played at stop_time, then full exit (empty = hard stop)
     channel_enabled: {}           # YouTube channel handles + enabled state, e.g. "@channelname": true
     feeds: {}                     # Podcast RSS feeds, e.g. "My feed": {url: "https://example.com/feed.xml", enabled: true}

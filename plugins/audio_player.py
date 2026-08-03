@@ -61,6 +61,12 @@ class AudioPlayerPlugin(Plugin):
         self.series_order: list[str] = []
         self.selected_series = config.get("selected_series", "")
 
+        auto_start = config.get("auto_start") or {}
+        self.auto_start_enabled: bool = bool(auto_start.get("enabled", False))
+        self.auto_start_time: str = str(auto_start.get("time", "08:00"))
+        self._auto_triggered_today = False
+        self._scheduler_thread: threading.Thread | None = None
+
     def _past_stop_time(self) -> bool:
         now = datetime.now().time()
         if self.stop_time.hour < 6:
@@ -82,6 +88,10 @@ class AudioPlayerPlugin(Plugin):
             if "audio_player" not in cfg["plugins"]:
                 cfg["plugins"]["audio_player"] = {}
             cfg["plugins"]["audio_player"]["selected_series"] = self.selected_series
+            cfg["plugins"]["audio_player"]["auto_start"] = {
+                "enabled": self.auto_start_enabled,
+                "time": self.auto_start_time,
+            }
             with open(path, "w") as f:
                 yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
         except Exception as e:
@@ -208,6 +218,10 @@ class AudioPlayerPlugin(Plugin):
             "selected_series": self.selected_series,
             "past_stop_time": self._past_stop_time(),
             "stop_time": self.stop_time.strftime("%H:%M"),
+            "auto_start": {
+                "enabled": self.auto_start_enabled,
+                "time": self.auto_start_time,
+            },
             "current_series_files": [
                 f.stem for f in self.audio_files_by_series.get(self.current_series, [])
             ] if self.current_series else [],
@@ -304,8 +318,30 @@ class AudioPlayerPlugin(Plugin):
         self.paused = False
         self._emit_state()
 
+    def _scheduler_loop(self):
+        last_date = datetime.now().date()
+        while self.running:
+            now = datetime.now()
+            if now.date() != last_date:
+                self._auto_triggered_today = False
+                last_date = now.date()
+            if (
+                self.auto_start_enabled
+                and not self._auto_triggered_today
+                and now.strftime("%H:%M") == self.auto_start_time
+                and not self.playing
+            ):
+                self._auto_triggered_today = True
+                self.log.info("auto-start at %s", self.auto_start_time)
+                self.start_playback()
+            time.sleep(30)
+
     def start(self):
         super().start()
+        self._scheduler_thread = threading.Thread(
+            target=self._scheduler_loop, daemon=True
+        )
+        self._scheduler_thread.start()
         self.log.info("ready (idle)")
 
     def stop(self):
@@ -400,6 +436,20 @@ class AudioPlayerPlugin(Plugin):
                 return {"ok": False, "error": str(e)}
             return {"ok": True}
 
+        @self.router.post("/auto_start")
+        async def auto_start_route(request: Request):
+            data = await request.json()
+            if "enabled" in data:
+                self.auto_start_enabled = bool(data["enabled"])
+            if "time" in data and data["time"]:
+                self.auto_start_time = str(data["time"])
+            self._save_config()
+            return {
+                "ok": True,
+                "enabled": self.auto_start_enabled,
+                "time": self.auto_start_time,
+            }
+
         app.include_router(self.router)
 
     def ui_section(self) -> str:
@@ -418,6 +468,16 @@ class AudioPlayerPlugin(Plugin):
             <span class="auto-stop-label">Auto-stop</span>
             <span class="auto-stop-value" id="ap-stop-time-display" onclick="apEditStopTime()">--:--</span>
             <input type="time" id="ap-stop-time-input" style="display:none" onchange="apSaveStopTime()">
+          </div>
+
+          <div class="auto-stop-row">
+            <span class="auto-stop-label">Auto-start</span>
+            <span class="auto-stop-value" id="ap-auto-start-display" onclick="apEditAutoStart()">--:--</span>
+            <input type="time" id="ap-auto-start-input" style="display:none" onchange="apSaveAutoStart()">
+            <label class="switch">
+              <input type="checkbox" id="ap-auto-start-toggle" onchange="apSetAutoStartToggle()">
+              <span class="track"><span class="thumb"></span></span>
+            </label>
           </div>
 
           <div class="auto-stop-row">
@@ -482,6 +542,21 @@ class AudioPlayerPlugin(Plugin):
 "  if (!confirm('Reboot the camera? Audio will stop, camera offline ~1-2 min.')) return;\n"
 "  await apFetch('/api/audio_player/restart_camera');\n"
 "}\n"
+"function apEditAutoStart() {\n"
+"  var input = document.getElementById('ap-auto-start-input');\n"
+"  if (input.showPicker) input.showPicker(); else input.click();\n"
+"}\n"
+"async function apSaveAutoStart() {\n"
+"  var val = document.getElementById('ap-auto-start-input').value;\n"
+"  if (val) {\n"
+"    document.getElementById('ap-auto-start-display').textContent = val;\n"
+"    await apFetch('/api/audio_player/auto_start', { time: val });\n"
+"  }\n"
+"}\n"
+"async function apSetAutoStartToggle() {\n"
+"  var on = document.getElementById('ap-auto-start-toggle').checked;\n"
+"  await apFetch('/api/audio_player/auto_start', { enabled: on });\n"
+"}\n"
             "async function apPoll() {\n"
             "  try {\n"
             "    const r = await fetch('/api/audio_player/status');\n"
@@ -496,6 +571,10 @@ class AudioPlayerPlugin(Plugin):
             "    }\n"
             "    document.getElementById('ap-stop-time-display').textContent = s.stop_time || '--:--';\n"
             "    document.getElementById('ap-stop-time-input').value = s.stop_time || '--:--';\n"
+            "    var as = s.auto_start || {};\n"
+            "    document.getElementById('ap-auto-start-display').textContent = as.time || '--:--';\n"
+            "    document.getElementById('ap-auto-start-input').value = as.time || '--:--';\n"
+            "    document.getElementById('ap-auto-start-toggle').checked = !!as.enabled;\n"
             "    var playBtn = document.getElementById('ap-play-btn');\n"
             "    if (s.state === 'idle') {\n"
             "      playBtn.innerHTML = '\\u25B6';\n"
