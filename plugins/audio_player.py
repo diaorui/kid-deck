@@ -455,7 +455,10 @@ class AudioPlayerPlugin(Plugin):
     def ui_section(self) -> str:
         return """
         <div class="plugin-section" id="plugin-audio_player">
-          <div class="yt-status-line" id="ap-status-line">Idle</div>
+          <div class="yt-status-line" style="display:flex; justify-content:space-between; align-items:center">
+            <span id="ap-status-line">Idle</span>
+            <span class="camera-status" id="ap-camera-status">&#x25CF; Connected</span>
+          </div>
 
           <div class="volume-row">
             <span class="vol-label">Volume</span>

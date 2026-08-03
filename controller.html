@@ -34,11 +34,11 @@
     padding: 16px 16px 8px; flex-shrink: 0;
   }
   header h1 { font-size: 18px; font-weight: 600; }
-  .conn-status {
+  .camera-status {
     font-size: 12px; padding: 4px 10px; border-radius: 20px;
     background: var(--success); color: #000;
   }
-  .conn-status.disconnected { background: var(--danger); color: #fff; }
+  .camera-status.disconnected { background: var(--danger); color: #fff; }
 
   .tabs {
     display: flex; gap: 4px; padding: 8px 16px; flex-shrink: 0;
@@ -332,7 +332,6 @@
 
 <header>
   <h1>📡 KidDeck</h1>
-  <span class="conn-status" id="conn-status">● Connected</span>
 </header>
 
 <nav class="tabs" id="tabs">
@@ -380,18 +379,20 @@ async function pollStatus() {
   try {
     var r = await fetch('/api/status');
     var s = await r.json();
-    var el = document.getElementById('conn-status');
+    var el = document.getElementById('ap-camera-status');
+    if (!el) return;
     if (s.camera_connected) {
       el.textContent = '● Connected';
-      el.className = 'conn-status';
+      el.className = 'camera-status';
     } else {
       el.textContent = '● No Camera';
-      el.className = 'conn-status disconnected';
+      el.className = 'camera-status disconnected';
     }
   } catch(e) {
-    var el = document.getElementById('conn-status');
+    var el = document.getElementById('ap-camera-status');
+    if (!el) return;
     el.textContent = '● Disconnected';
-    el.className = 'conn-status disconnected';
+    el.className = 'camera-status disconnected';
   }
 }
 setInterval(pollStatus, 3000);
@@ -401,8 +402,11 @@ pollStatus();
 function confirmRestart() {
   if (confirm('Restart the controller? Audio will stop briefly.')) {
     fetch('/api/restart', { method: 'POST' });
-    document.getElementById('conn-status').textContent = '● Restarting';
-    document.getElementById('conn-status').className = 'conn-status disconnected';
+    var el = document.getElementById('ap-camera-status');
+    if (el) {
+      el.textContent = '● Restarting';
+      el.className = 'camera-status disconnected';
+    }
   }
 }
 </script>
