@@ -343,11 +343,11 @@ class AudioPlayerPlugin(Plugin):
                 self.auto_start_enabled
                 and not self._auto_triggered_today
                 and now.strftime("%H:%M") == self.auto_start_time
-                and not self.playing
             ):
                 self._auto_triggered_today = True
-                self.log.info("auto-start at %s", self.auto_start_time)
-                self.start_playback()
+                if not self.playing:
+                    self.log.info("auto-start at %s", self.auto_start_time)
+                    self.start_playback()
             time.sleep(30)
 
     def start(self):
