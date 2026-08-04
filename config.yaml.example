@@ -24,6 +24,9 @@ plugins:
     volume: 60
     schedule:
       stop_time: "23:00"
+    auto_stop:
+      enabled: true          # Auto-stop at fixed time daily (default on)
+      time: "23:00"
     auto_start:
       enabled: false         # Auto-start playback at fixed time daily
       time: "08:00"
@@ -40,6 +43,9 @@ plugins:
     max_age_days: 5                # Delete cached items older than this
     schedule:
       stop_time: "21:00"          # Clock time auto-stop (like audio_player)
+    auto_stop:
+      enabled: true          # Auto-stop at fixed time daily (default on)
+      time: "21:00"
     auto_start:
       enabled: false         # Auto-start playback at fixed time daily
       time: "08:00"

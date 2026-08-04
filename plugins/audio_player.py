@@ -36,8 +36,12 @@ class AudioPlayerPlugin(Plugin):
         self.volume = config.get("volume", 60)
         self.bytes_per_second = self.rate * 2
 
-        sched = config["schedule"]
-        self.stop_time = parse_time(sched["stop_time"])
+        sched = config.get("schedule") or {}
+        auto_stop = config.get("auto_stop") or {}
+        self.auto_stop_enabled: bool = bool(auto_stop.get("enabled", True))
+        self.stop_time = parse_time(
+            auto_stop.get("time") or sched.get("stop_time", "21:00")
+        )
 
         self.cache_dir = Path(__file__).resolve().parent.parent / "cache"
         self.cache_dir.mkdir(exist_ok=True)
@@ -68,6 +72,8 @@ class AudioPlayerPlugin(Plugin):
         self._scheduler_thread: threading.Thread | None = None
 
     def _past_stop_time(self) -> bool:
+        if not self.auto_stop_enabled:
+            return False
         now = datetime.now().time()
         if self.stop_time.hour < 6:
             if now.hour < 6:
@@ -88,6 +94,10 @@ class AudioPlayerPlugin(Plugin):
             if "audio_player" not in cfg["plugins"]:
                 cfg["plugins"]["audio_player"] = {}
             cfg["plugins"]["audio_player"]["selected_series"] = self.selected_series
+            cfg["plugins"]["audio_player"]["auto_stop"] = {
+                "enabled": self.auto_stop_enabled,
+                "time": self.stop_time.strftime("%H:%M"),
+            }
             cfg["plugins"]["audio_player"]["auto_start"] = {
                 "enabled": self.auto_start_enabled,
                 "time": self.auto_start_time,
@@ -218,6 +228,10 @@ class AudioPlayerPlugin(Plugin):
             "selected_series": self.selected_series,
             "past_stop_time": self._past_stop_time(),
             "stop_time": self.stop_time.strftime("%H:%M"),
+            "auto_stop": {
+                "enabled": self.auto_stop_enabled,
+                "time": self.stop_time.strftime("%H:%M"),
+            },
             "auto_start": {
                 "enabled": self.auto_start_enabled,
                 "time": self.auto_start_time,
@@ -450,6 +464,20 @@ class AudioPlayerPlugin(Plugin):
                 "time": self.auto_start_time,
             }
 
+        @self.router.post("/auto_stop")
+        async def auto_stop_route(request: Request):
+            data = await request.json()
+            if "enabled" in data:
+                self.auto_stop_enabled = bool(data["enabled"])
+            if "time" in data and data["time"]:
+                self.stop_time = parse_time(str(data["time"]))
+            self._save_config()
+            return {
+                "ok": True,
+                "enabled": self.auto_stop_enabled,
+                "time": self.stop_time.strftime("%H:%M"),
+            }
+
         app.include_router(self.router)
 
     def ui_section(self) -> str:
@@ -468,17 +496,21 @@ class AudioPlayerPlugin(Plugin):
           </div>
 
           <div class="auto-stop-row">
-            <span class="auto-stop-label">Auto-stop</span>
-            <span class="auto-stop-value" id="ap-stop-time-display" onclick="apEditStopTime()">--:--</span>
-            <input type="time" id="ap-stop-time-input" style="display:none" onchange="apSaveStopTime()">
-          </div>
-
-          <div class="auto-stop-row">
             <span class="auto-stop-label">Auto-start</span>
             <span class="auto-stop-value" id="ap-auto-start-display" onclick="apEditAutoStart()">--:--</span>
             <input type="time" id="ap-auto-start-input" style="display:none" onchange="apSaveAutoStart()">
             <label class="switch">
               <input type="checkbox" id="ap-auto-start-toggle" onchange="apSetAutoStartToggle()">
+              <span class="track"><span class="thumb"></span></span>
+            </label>
+          </div>
+
+          <div class="auto-stop-row">
+            <span class="auto-stop-label">Auto-stop</span>
+            <span class="auto-stop-value" id="ap-auto-stop-display" onclick="apEditAutoStop()">--:--</span>
+            <input type="time" id="ap-auto-stop-input" style="display:none" onchange="apSaveAutoStop()">
+            <label class="switch">
+              <input type="checkbox" id="ap-auto-stop-toggle" onchange="apSetAutoStopToggle()" checked>
               <span class="track"><span class="thumb"></span></span>
             </label>
           </div>
@@ -530,16 +562,20 @@ class AudioPlayerPlugin(Plugin):
             "  await apFetch('/api/audio_player/volume', { volume: parseInt(val) });\n"
             "}\n"
             "function apSelectSeries(name) { apFetch('/api/audio_player/select_series', { series: name }); }\n"
-"function apEditStopTime() {\n"
-"  var input = document.getElementById('ap-stop-time-input');\n"
+"function apEditAutoStop() {\n"
+"  var input = document.getElementById('ap-auto-stop-input');\n"
 "  if (input.showPicker) input.showPicker(); else input.click();\n"
 "}\n"
-"async function apSaveStopTime() {\n"
-"  var val = document.getElementById('ap-stop-time-input').value;\n"
+"async function apSaveAutoStop() {\n"
+"  var val = document.getElementById('ap-auto-stop-input').value;\n"
 "  if (val) {\n"
-"    document.getElementById('ap-stop-time-display').textContent = val;\n"
-"    await apFetch('/api/audio_player/stop_time', { time: val });\n"
+"    document.getElementById('ap-auto-stop-display').textContent = val;\n"
+"    await apFetch('/api/audio_player/auto_stop', { time: val });\n"
 "  }\n"
+"}\n"
+"async function apSetAutoStopToggle() {\n"
+"  var on = document.getElementById('ap-auto-stop-toggle').checked;\n"
+"  await apFetch('/api/audio_player/auto_stop', { enabled: on });\n"
 "}\n"
 "async function apRestartCamera() {\n"
 "  if (!confirm('Reboot the camera? Audio will stop, camera offline ~1-2 min.')) return;\n"
@@ -572,8 +608,10 @@ class AudioPlayerPlugin(Plugin):
             "      var label = ({playing:'Playing', paused:'Paused', preparing:'Preparing...'})[s.state] || s.state;\n"
             "      statusEl.textContent = label + ': ' + (s.current_series || '?') + ' \\u00B7 ' + (s.current_index || 0) + '/' + (s.total_in_series || 0);\n"
             "    }\n"
-            "    document.getElementById('ap-stop-time-display').textContent = s.stop_time || '--:--';\n"
-            "    document.getElementById('ap-stop-time-input').value = s.stop_time || '--:--';\n"
+            "    var aso = s.auto_stop || {};\n"
+            "    document.getElementById('ap-auto-stop-display').textContent = aso.time || '--:--';\n"
+            "    document.getElementById('ap-auto-stop-input').value = aso.time || '--:--';\n"
+            "    document.getElementById('ap-auto-stop-toggle').checked = aso.enabled !== false;\n"
             "    var as = s.auto_start || {};\n"
             "    document.getElementById('ap-auto-start-display').textContent = as.time || '--:--';\n"
             "    document.getElementById('ap-auto-start-input').value = as.time || '--:--';\n"

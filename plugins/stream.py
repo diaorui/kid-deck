@@ -488,7 +488,11 @@ class StreamPlugin(Plugin):
         self.max_age_days: int = int(config.get("max_age_days", 5))
 
         sched = config.get("schedule") or {}
-        self.stop_time = parse_time(sched.get("stop_time", "21:00"))
+        auto_stop = config.get("auto_stop") or {}
+        self.auto_stop_enabled: bool = bool(auto_stop.get("enabled", True))
+        self.stop_time = parse_time(
+            auto_stop.get("time") or sched.get("stop_time", "21:00")
+        )
         self.outro_video_url: str = str(config.get("outro_video_url", "") or "")
 
         auto_start = config.get("auto_start") or {}
@@ -703,6 +707,8 @@ class StreamPlugin(Plugin):
                 pass
 
     def _past_stop_time(self) -> bool:
+        if not self.auto_stop_enabled:
+            return False
         now = datetime.now().time()
         if self.stop_time.hour < 6:
             if now.hour < 6:
@@ -733,6 +739,10 @@ class StreamPlugin(Plugin):
                 "max_age_days": self.max_age_days,
                 "schedule": {
                     "stop_time": self.stop_time.strftime("%H:%M"),
+                },
+                "auto_stop": {
+                    "enabled": self.auto_stop_enabled,
+                    "time": self.stop_time.strftime("%H:%M"),
                 },
                 "auto_start": {
                     "enabled": self.auto_start_enabled,
@@ -1499,6 +1509,10 @@ class StreamPlugin(Plugin):
                     },
                     "stop_time": self.stop_time.strftime("%H:%M"),
                     "past_stop_time": self._past_stop_time(),
+                    "auto_stop": {
+                        "enabled": self.auto_stop_enabled,
+                        "time": self.stop_time.strftime("%H:%M"),
+                    },
                     "auto_start": {
                         "enabled": self.auto_start_enabled,
                         "time": self.auto_start_time,
@@ -1713,6 +1727,25 @@ class StreamPlugin(Plugin):
                 "time": self.auto_start_time,
             }
 
+        @self.router.post("/auto_stop")
+        async def auto_stop_route(request: Request):
+            data = await request.json()
+            with self._lock:
+                if "enabled" in data:
+                    self.auto_stop_enabled = bool(data["enabled"])
+                if "time" in data and data["time"]:
+                    self.stop_time = parse_time(str(data["time"]))
+            self._save_config()
+            if self._past_stop_time():
+                with self._lock:
+                    if self.status == "playing":
+                        self._do_stop()
+            return {
+                "ok": True,
+                "enabled": self.auto_stop_enabled,
+                "time": self.stop_time.strftime("%H:%M"),
+            }
+
         @self.router.post("/toggle_channel")
         async def toggle_channel(request: Request):
             data = await request.json()
@@ -1826,17 +1859,21 @@ class StreamPlugin(Plugin):
           <div id="st-errmsg" style="display:none; padding:8px 12px; background:#2a1515; border:1px solid #ff4444; border-radius:8px; font-size:13px; color:#ff8888; margin-bottom:12px"></div>
 
           <div class="auto-stop-row">
-            <span class="auto-stop-label">Auto-stop</span>
-            <span class="auto-stop-value" id="st-stop-time-display" onclick="stEditStopTime()">--:--</span>
-            <input type="time" id="st-stop-time-input" style="display:none" onchange="stSaveStopTime()">
-          </div>
-
-          <div class="auto-stop-row">
             <span class="auto-stop-label">Auto-start</span>
             <span class="auto-stop-value" id="st-auto-start-display" onclick="stEditAutoStart()">--:--</span>
             <input type="time" id="st-auto-start-input" style="display:none" onchange="stSaveAutoStart()">
             <label class="switch">
               <input type="checkbox" id="st-auto-start-toggle" onchange="stSetAutoStartToggle()">
+              <span class="track"><span class="thumb"></span></span>
+            </label>
+          </div>
+
+          <div class="auto-stop-row">
+            <span class="auto-stop-label">Auto-stop</span>
+            <span class="auto-stop-value" id="st-auto-stop-display" onclick="stEditAutoStop()">--:--</span>
+            <input type="time" id="st-auto-stop-input" style="display:none" onchange="stSaveAutoStop()">
+            <label class="switch">
+              <input type="checkbox" id="st-auto-stop-toggle" onchange="stSetAutoStopToggle()" checked>
               <span class="track"><span class="thumb"></span></span>
             </label>
           </div>
@@ -1998,16 +2035,20 @@ class StreamPlugin(Plugin):
           const r = await stFetch('/api/stream/skip');
           if (r && !r.ok && r.error) stShowError(r.error);
         }
-        function stEditStopTime() {
-          var input = document.getElementById('st-stop-time-input');
+        function stEditAutoStop() {
+          var input = document.getElementById('st-auto-stop-input');
           if (input.showPicker) input.showPicker(); else input.click();
         }
-        async function stSaveStopTime() {
-          var val = document.getElementById('st-stop-time-input').value;
+        async function stSaveAutoStop() {
+          var val = document.getElementById('st-auto-stop-input').value;
           if (val) {
-            document.getElementById('st-stop-time-display').textContent = val;
-            await stFetch('/api/stream/stop_time', { time: val });
+            document.getElementById('st-auto-stop-display').textContent = val;
+            await stFetch('/api/stream/auto_stop', { time: val });
           }
+        }
+        async function stSetAutoStopToggle() {
+          var on = document.getElementById('st-auto-stop-toggle').checked;
+          await stFetch('/api/stream/auto_stop', { enabled: on });
         }
         function stEditAutoStart() {
           var input = document.getElementById('st-auto-start-input');
@@ -2253,8 +2294,10 @@ class StreamPlugin(Plugin):
             if (s.past_stop_time && s.status !== 'ending') {
               statusEl.textContent += ' · past stop time';
             }
-            document.getElementById('st-stop-time-display').textContent = s.stop_time || '--:--';
-            document.getElementById('st-stop-time-input').value = s.stop_time || '';
+            var stAso = s.auto_stop || {};
+            document.getElementById('st-auto-stop-display').textContent = stAso.time || '--:--';
+            document.getElementById('st-auto-stop-input').value = stAso.time || '';
+            document.getElementById('st-auto-stop-toggle').checked = stAso.enabled !== false;
             var stAs = s.auto_start || {};
             document.getElementById('st-auto-start-display').textContent = stAs.time || '--:--';
             document.getElementById('st-auto-start-input').value = stAs.time || '';
