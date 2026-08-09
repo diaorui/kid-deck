@@ -41,6 +41,7 @@ plugins:
     feed_interval: 60
     max_items_per_feed: 5          # Max cached items per channel/feed
     max_age_days: 5                # Delete cached items older than this
+    content_mode: "mixed"          # mixed | video | audio (only that kind enters playlist)
     schedule:
       stop_time: "21:00"          # Clock time auto-stop (like audio_player)
     auto_stop:

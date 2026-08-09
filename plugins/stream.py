@@ -486,6 +486,8 @@ class StreamPlugin(Plugin):
         self.feed_interval: int = int(config.get("feed_interval", 60))
         self.max_items_per_feed: int = int(config.get("max_items_per_feed", 5))
         self.max_age_days: int = int(config.get("max_age_days", 5))
+        mode = str(config.get("content_mode", "mixed")).lower()
+        self.content_mode: str = mode if mode in ("mixed", "video", "audio") else "mixed"
 
         sched = config.get("schedule") or {}
         auto_stop = config.get("auto_stop") or {}
@@ -737,6 +739,7 @@ class StreamPlugin(Plugin):
                 "feed_interval": self.feed_interval,
                 "max_items_per_feed": self.max_items_per_feed,
                 "max_age_days": self.max_age_days,
+                "content_mode": self.content_mode,
                 "schedule": {
                     "stop_time": self.stop_time.strftime("%H:%M"),
                 },
@@ -845,6 +848,10 @@ class StreamPlugin(Plugin):
             if acc >= horizon_sec:
                 break
 
+        if self.content_mode == "video":
+            return video_pool, []
+        if self.content_mode == "audio":
+            return [], audio_pool
         return video_pool, audio_pool
 
     def _replan_locked(self) -> bool:
@@ -1529,6 +1536,7 @@ class StreamPlugin(Plugin):
                         "max_audio_minutes": self.max_audio_minutes,
                         "playlist_horizon_hours": self.playlist_horizon_hours,
                     },
+                    "content_mode": self.content_mode,
                 }
 
         @self.router.post("/connect")
@@ -1746,6 +1754,18 @@ class StreamPlugin(Plugin):
                 "time": self.stop_time.strftime("%H:%M"),
             }
 
+        @self.router.post("/content_mode")
+        async def content_mode_route(request: Request):
+            data = await request.json()
+            mode = str(data.get("mode", "")).lower()
+            if mode not in ("mixed", "video", "audio"):
+                return {"ok": False, "error": "invalid mode"}
+            with self._lock:
+                self.content_mode = mode
+            self._save_config()
+            self.log.info("content_mode → %s", mode)
+            return {"ok": True, "mode": self.content_mode}
+
         @self.router.post("/toggle_channel")
         async def toggle_channel(request: Request):
             data = await request.json()
@@ -1881,6 +1901,14 @@ class StreamPlugin(Plugin):
           <details class="collapsible" id="st-settings-section">
             <summary>Settings</summary>
             <div style="display:flex;flex-direction:column;gap:10px;padding:4px 0 8px">
+              <div class="auto-stop-row" style="margin:0">
+                <span class="auto-stop-label">Content</span>
+                <div class="series-pills" id="st-content-mode" style="margin:0">
+                  <button class="series-pill" data-mode="mixed" onclick="stSetContentMode('mixed')">Mixed</button>
+                  <button class="series-pill" data-mode="video" onclick="stSetContentMode('video')">Video</button>
+                  <button class="series-pill" data-mode="audio" onclick="stSetContentMode('audio')">Audio</button>
+                </div>
+              </div>
               <div class="auto-stop-row" style="margin:0">
                 <span class="auto-stop-label">Screen min/hour</span>
                 <input type="number" id="st-param-screen" min="1" max="60" step="1"
@@ -2034,6 +2062,13 @@ class StreamPlugin(Plugin):
         async function stSkip() {
           const r = await stFetch('/api/stream/skip');
           if (r && !r.ok && r.error) stShowError(r.error);
+        }
+        async function stSetContentMode(mode) {
+          await stFetch('/api/stream/content_mode', { mode: mode });
+          var pills = document.querySelectorAll('#st-content-mode .series-pill');
+          pills.forEach(function(p) {
+            p.classList.toggle('active', p.getAttribute('data-mode') === mode);
+          });
         }
         function stEditAutoStop() {
           var input = document.getElementById('st-auto-stop-input');
@@ -2302,6 +2337,10 @@ class StreamPlugin(Plugin):
             document.getElementById('st-auto-start-display').textContent = stAs.time || '--:--';
             document.getElementById('st-auto-start-input').value = stAs.time || '';
             document.getElementById('st-auto-start-toggle').checked = !!stAs.enabled;
+            var cm = s.content_mode || 'mixed';
+            document.querySelectorAll('#st-content-mode .series-pill').forEach(function(p) {
+              p.classList.toggle('active', p.getAttribute('data-mode') === cm);
+            });
             var active = (s.status === 'playing' || s.status === 'ending');
             document.getElementById('st-play-btn').style.display = active ? 'none' : '';
             document.getElementById('st-stop-btn').style.display = active ? '' : 'none';
