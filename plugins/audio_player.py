@@ -51,6 +51,11 @@ class AudioPlayerPlugin(Plugin):
         self._resume_event = threading.Event()
         self._resume_event.set()
         self._thread: threading.Thread | None = None
+        self._file_done_event = threading.Event()
+
+        self.output_mode: str = (
+            "device" if config.get("output_mode", "camera") == "device" else "camera"
+        )
 
         self.current_series = ""
         self.current_file = ""
@@ -61,6 +66,7 @@ class AudioPlayerPlugin(Plugin):
         self.streaming = False
 
         self.audio_files_by_series: dict[str, list[Path]] = {}
+        self.relative_file_map: dict[str, Path] = {}
         self.pcm_cache: dict[Path, bytes] = {}
         self.series_order: list[str] = []
         self.selected_series = config.get("selected_series", "")
@@ -94,6 +100,7 @@ class AudioPlayerPlugin(Plugin):
             if "audio_player" not in cfg["plugins"]:
                 cfg["plugins"]["audio_player"] = {}
             cfg["plugins"]["audio_player"]["selected_series"] = self.selected_series
+            cfg["plugins"]["audio_player"]["output_mode"] = self.output_mode
             cfg["plugins"]["audio_player"]["auto_stop"] = {
                 "enabled": self.auto_stop_enabled,
                 "time": self.stop_time.strftime("%H:%M"),
@@ -132,6 +139,11 @@ class AudioPlayerPlugin(Plugin):
                 files.extend(sorted(series_dir.glob(p), key=lambda f: f.name))
             if files:
                 self.audio_files_by_series[series_name] = files
+
+        self.relative_file_map = {}
+        for fp in self.audio_files_by_series.values():
+            for f in fp:
+                self.relative_file_map[str(f.relative_to(self.stories_root))] = f
 
         if not self.audio_files_by_series:
             raise RuntimeError(f"No mp3/wav files found under {self.stories_root}")
@@ -223,6 +235,7 @@ class AudioPlayerPlugin(Plugin):
             "current_index": self.current_index,
             "total_in_series": self.total_in_series,
             "volume": self.volume,
+            "output_mode": self.output_mode,
             "series_list": list(self.audio_files_by_series.keys()),
             "series_file_counts": {k: len(v) for k, v in self.audio_files_by_series.items()},
             "selected_series": self.selected_series,
@@ -314,10 +327,20 @@ class AudioPlayerPlugin(Plugin):
                     self._abort_event.clear()
                     self.streaming = True
                     self._emit_state()
-                    camera = self.controller.camera
-                    camera.play_pcm(pcm, self.rate, self.volume,
-                                    abort_event=self._abort_event,
-                                    tick_callback=self._process_commands)
+                    if self.output_mode == "device":
+                        # Browser plays WAV via /audio endpoint; advance on file_done
+                        self._file_done_event.clear()
+                        while (
+                            not self._file_done_event.is_set()
+                            and not self._abort_event.is_set()
+                        ):
+                            self._process_commands()
+                            time.sleep(0.5)
+                    else:
+                        camera = self.controller.camera
+                        camera.play_pcm(pcm, self.rate, self.volume,
+                                        abort_event=self._abort_event,
+                                        tick_callback=self._process_commands)
                     self.streaming = False
 
                     if self._abort_event.is_set():
@@ -379,6 +402,7 @@ class AudioPlayerPlugin(Plugin):
                 break
         self._abort_event.clear()
         self._resume_event.set()
+        self._file_done_event.clear()
         self.current_series = ""
         self.current_file = ""
         self.current_index = 0
@@ -440,6 +464,48 @@ class AudioPlayerPlugin(Plugin):
                 self.stop_time = parse_time(time_str)
             return {"ok": True}
 
+        @self.router.post("/output_mode")
+        async def output_mode_route(request: Request):
+            data = await request.json()
+            mode = str(data.get("mode", "")).lower()
+            if mode not in ("camera", "device"):
+                return {"ok": False, "error": "invalid mode"}
+            if self.playing:
+                return {"ok": False, "error": "stop playback first"}
+            self.output_mode = mode
+            self._save_config()
+            self.log.info("output_mode → %s", mode)
+            return {"ok": True, "mode": self.output_mode}
+
+        @self.router.get("/audio")
+        async def serve_audio(file: str = ""):
+            import struct
+            from fastapi import HTTPException
+            from fastapi.responses import StreamingResponse
+
+            fp = self.relative_file_map.get(file)
+            if fp is None or fp not in self.pcm_cache:
+                raise HTTPException(status_code=404, detail="file not found")
+            pcm = self.pcm_cache[fp]
+
+            def _wav_chunks():
+                hdr = struct.pack(
+                    "<4sI4s4sIHHIIHH4sI",
+                    b"RIFF", 36 + len(pcm), b"WAVE",
+                    b"fmt ", 16, 1, 1, self.rate, self.rate * 2, 2, 16,
+                    b"data", len(pcm),
+                )
+                yield hdr
+                for i in range(0, len(pcm), 32768):
+                    yield pcm[i:i + 32768]
+
+            return StreamingResponse(_wav_chunks(), media_type="audio/wav")
+
+        @self.router.post("/file_done")
+        async def file_done():
+            self._file_done_event.set()
+            return {"ok": True}
+
         @self.router.post("/restart_camera")
         async def restart_camera():
             self.stop_playback()
@@ -494,6 +560,16 @@ class AudioPlayerPlugin(Plugin):
                    oninput="apSetVolume(this.value)">
             <span class="vol-value" id="ap-volume-display">60</span>
           </div>
+
+          <div class="auto-stop-row">
+            <span class="auto-stop-label">Output</span>
+            <div class="series-pills" id="ap-output-mode" style="margin:0">
+              <button class="series-pill" data-mode="camera" onclick="apSetOutputMode('camera')">Camera</button>
+              <button class="series-pill" data-mode="device" onclick="apSetOutputMode('device')">Device</button>
+            </div>
+          </div>
+
+          <audio id="ap-audio" style="display:none"></audio>
 
           <div class="auto-stop-row">
             <span class="auto-stop-label">Auto-start</span>
@@ -596,6 +672,25 @@ class AudioPlayerPlugin(Plugin):
 "  var on = document.getElementById('ap-auto-start-toggle').checked;\n"
 "  await apFetch('/api/audio_player/auto_start', { enabled: on });\n"
 "}\n"
+"var apAudioEl = document.getElementById('ap-audio');\n"
+"var apAudioLoadedFile = '';\n"
+"var apAudioDirty = true;\n"
+"var apAudioWasPaused = false;\n"
+"function apSetOutputMode(mode) {\n"
+"  apFetch('/api/audio_player/output_mode', { mode: mode });\n"
+"  var pills = document.querySelectorAll('#ap-output-mode .series-pill');\n"
+"  pills.forEach(function(p) { p.classList.toggle('active', p.getAttribute('data-mode') === mode); });\n"
+"}\n"
+"if (apAudioEl) {\n"
+"  apAudioEl.addEventListener('ended', function() {\n"
+"    apAudioDirty = true;\n"
+"    apFetch('/api/audio_player/file_done');\n"
+"  });\n"
+"  apAudioEl.addEventListener('error', function() {\n"
+"    apAudioDirty = true;\n"
+"    apFetch('/api/audio_player/file_done');\n"
+"  });\n"
+"}\n"
             "async function apPoll() {\n"
             "  try {\n"
             "    const r = await fetch('/api/audio_player/status');\n"
@@ -626,6 +721,35 @@ class AudioPlayerPlugin(Plugin):
             "    }\n"
             "    document.getElementById('ap-volume-slider').value = s.volume;\n"
             "    document.getElementById('ap-volume-display').textContent = s.volume;\n"
+            "    var om = s.output_mode || 'camera';\n"
+            "    var omPills = document.querySelectorAll('#ap-output-mode .series-pill');\n"
+            "    omPills.forEach(function(p) {\n"
+            "      p.classList.toggle('active', p.getAttribute('data-mode') === om);\n"
+            "      p.disabled = s.state !== 'idle';\n"
+            "    });\n"
+            "    if (apAudioEl) {\n"
+            "      if (om === 'device') {\n"
+            "        apAudioEl.volume = (s.volume || 0) / 100;\n"
+            "        if (s.state === 'idle') {\n"
+            "          apAudioEl.pause();\n"
+            "          apAudioEl.removeAttribute('src');\n"
+            "          apAudioLoadedFile = '';\n"
+            "          apAudioDirty = true;\n"
+            "          apAudioWasPaused = false;\n"
+            "        } else if (s.paused) {\n"
+            "          apAudioEl.pause();\n"
+            "          apAudioWasPaused = true;\n"
+            "        } else if (s.current_file && (apAudioDirty || apAudioLoadedFile !== s.current_file || apAudioWasPaused)) {\n"
+            "          apAudioWasPaused = false;\n"
+            "          apAudioLoadedFile = s.current_file;\n"
+            "          apAudioDirty = false;\n"
+            "          apAudioEl.src = '/api/audio_player/audio?file=' + encodeURIComponent(s.current_file);\n"
+            "          apAudioEl.play().catch(function(){});\n"
+            "        }\n"
+            "      } else {\n"
+            "        apAudioEl.pause();\n"
+            "      }\n"
+            "    }\n"
             "    var pills = document.getElementById('ap-series-pills');\n"
             "    if (s.series_list) {\n"
             "      var isPlaying = s.state !== 'idle';\n"

@@ -22,6 +22,7 @@ plugins:
     folder: ./stories        # Path to story series directories
     playback_rate: 16000
     volume: 60
+    output_mode: "camera"    # camera | device (play on the web-browsing device instead)
     schedule:
       stop_time: "23:00"
     auto_stop:
