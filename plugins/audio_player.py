@@ -272,88 +272,92 @@ class AudioPlayerPlugin(Plugin):
         return self.playing
 
     def _play_loop(self):
-        self.playing = True
-        loop_num = 0
+        try:
+            self.playing = True
+            loop_num = 0
 
-        while self.playing:
-            self._process_commands()
-            if self.paused:
-                self._wait_while_paused()
+            while self.playing:
+                self._process_commands()
+                if self.paused:
+                    self._wait_while_paused()
 
-            if not self.playing:
-                break
-
-            if self.selected_series:
-                series_list = [self.selected_series]
-            else:
-                series_list = list(self.series_order)
-                random.shuffle(series_list)
-
-            self.log.info("Loop %d starting: %s", loop_num + 1, series_list)
-
-            for series_name in series_list:
                 if not self.playing:
                     break
-                if not self._process_commands_loop(0, 0):
-                    break
 
-                files = self.audio_files_by_series[series_name]
-                start_idx = 0
+                if self.selected_series:
+                    series_list = [self.selected_series]
+                else:
+                    series_list = list(self.series_order)
+                    random.shuffle(series_list)
 
-                for idx in range(start_idx, len(files)):
+                self.log.info("Loop %d starting: %s", loop_num + 1, series_list)
+
+                for series_name in series_list:
                     if not self.playing:
                         break
                     if not self._process_commands_loop(0, 0):
                         break
 
-                    fp = files[idx]
-                    if fp not in self.pcm_cache:
-                        continue
-                    pcm = self.pcm_cache[fp]
+                    files = self.audio_files_by_series[series_name]
+                    start_idx = 0
 
-                    if self._past_stop_time():
-                        self.playing = False
-                        break
+                    for idx in range(start_idx, len(files)):
+                        if not self.playing:
+                            break
+                        if not self._process_commands_loop(0, 0):
+                            break
 
-                    self.current_series = series_name
-                    self.current_file = str(fp.relative_to(self.stories_root))
-                    self.current_index = idx + 1
-                    self.total_in_series = len(files)
-                    self._emit_state()
+                        fp = files[idx]
+                        if fp not in self.pcm_cache:
+                            continue
+                        pcm = self.pcm_cache[fp]
 
-                    dur = len(pcm) / self.bytes_per_second
-                    self.log.info("(%s, %.1fs)", self.current_file, dur)
+                        if self._past_stop_time():
+                            self.playing = False
+                            break
 
-                    self._abort_event.clear()
-                    self.streaming = True
-                    self._emit_state()
-                    if self.output_mode == "device":
-                        # Browser plays WAV via /audio endpoint; advance on file_done
-                        self._file_done_event.clear()
-                        while (
-                            not self._file_done_event.is_set()
-                            and not self._abort_event.is_set()
-                        ):
+                        self.current_series = series_name
+                        self.current_file = str(fp.relative_to(self.stories_root))
+                        self.current_index = idx + 1
+                        self.total_in_series = len(files)
+                        self._emit_state()
+
+                        dur = len(pcm) / self.bytes_per_second
+                        self.log.info("(%s, %.1fs)", self.current_file, dur)
+
+                        self._abort_event.clear()
+                        self.streaming = True
+                        self._emit_state()
+                        if self.output_mode == "device":
+                            # Browser plays WAV via /audio endpoint; advance on file_done
+                            self._file_done_event.clear()
+                            while (
+                                not self._file_done_event.is_set()
+                                and not self._abort_event.is_set()
+                            ):
+                                self._process_commands()
+                                time.sleep(0.5)
+                        else:
+                            camera = self.controller.camera
+                            camera.play_pcm(pcm, self.rate, self.volume,
+                                            abort_event=self._abort_event,
+                                            tick_callback=self._process_commands)
+                        self.streaming = False
+
+                        if self._abort_event.is_set():
                             self._process_commands()
-                            time.sleep(0.5)
-                    else:
-                        camera = self.controller.camera
-                        camera.play_pcm(pcm, self.rate, self.volume,
-                                        abort_event=self._abort_event,
-                                        tick_callback=self._process_commands)
-                    self.streaming = False
+                            break
 
-                    if self._abort_event.is_set():
-                        self._process_commands()
-                        break
+                        time.sleep(0.15)
 
-                    time.sleep(0.15)
-
-            loop_num += 1
-
-        self.playing = False
-        self.paused = False
-        self._emit_state()
+                loop_num += 1
+        except Exception:
+            self.log.exception("play loop crashed")
+        finally:
+            self.playing = False
+            self.paused = False
+            self.streaming = False
+            self._emit_state()
 
     def _scheduler_loop(self):
         last_date = datetime.now().date()
@@ -413,6 +417,10 @@ class AudioPlayerPlugin(Plugin):
         self._thread.start()
 
     def stop_playback(self):
+        self._abort_event.set()
+        self._resume_event.set()
+        self.playing = False
+        self.streaming = False
         self.cmd_queue.put((Command.STOP, None))
 
     def pause(self):
