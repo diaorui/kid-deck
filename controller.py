@@ -19,6 +19,27 @@ from plugins import Plugin
 
 
 def setup_logging(cfg: dict):
+    import faulthandler as _fh
+    import threading as _th
+    import time as _tm
+
+    try:
+        _fault_path = Path(__file__).parent / "fault.log"
+        _fault_file = open(_fault_path, "w")
+        _fh.enable(file=_fault_file)
+
+        def _watchdog():
+            while True:
+                _tm.sleep(60)
+                try:
+                    _fh.dump_traceback(file=_fault_file)
+                except Exception:
+                    pass
+
+        _th.Thread(target=_watchdog, daemon=True).start()
+    except Exception:
+        pass
+
     log_cfg = cfg.get("logging", {})
     log_path = Path(__file__).parent / (log_cfg.get("file", "app.log"))
     max_bytes = log_cfg.get("max_bytes", 5 * 1024 * 1024)
@@ -158,11 +179,26 @@ def main():
             {"plugins": controller.plugins},
         )
 
+    _status_cache: dict = {"ok": False, "ts": 0.0}
+
     @app.get("/api/status")
     async def status():
-        camera_ok = controller.camera.is_connected()
+        import asyncio as _asyncio
+        import time as _time
+
+        now = _time.time()
+        if now - _status_cache["ts"] > 15:
+            try:
+                loop = _asyncio.get_running_loop()
+                ok = await _asyncio.wait_for(
+                    loop.run_in_executor(None, controller.camera.is_connected),
+                    timeout=5,
+                )
+            except Exception:
+                ok = False
+            _status_cache.update(ok=ok, ts=now)
         return {
-            "camera_connected": camera_ok,
+            "camera_connected": _status_cache["ok"],
             "plugins": [p.name for p in controller.plugins],
         }
 

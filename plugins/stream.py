@@ -1670,16 +1670,27 @@ class StreamPlugin(Plugin):
 
         @self.router.post("/stop_time")
         async def stop_time_route(request: Request):
+            import asyncio
+
             data = await request.json()
             time_str = data.get("time", "")
             if time_str:
                 with self._lock:
                     self.stop_time = parse_time(time_str)
                 self._save_config()
+                needs_stop = False
                 if self._past_stop_time():
                     with self._lock:
-                        if self.status == "playing":
+                        needs_stop = self.status == "playing"
+                if needs_stop:
+
+                    def _locked_stop():
+                        with self._lock:
                             self._do_stop()
+
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, _locked_stop
+                    )
             return {"ok": True, "stop_time": self.stop_time.strftime("%H:%M")}
 
         @self.router.post("/settings")
@@ -1737,6 +1748,8 @@ class StreamPlugin(Plugin):
 
         @self.router.post("/auto_stop")
         async def auto_stop_route(request: Request):
+            import asyncio
+
             data = await request.json()
             with self._lock:
                 if "enabled" in data:
@@ -1744,10 +1757,17 @@ class StreamPlugin(Plugin):
                 if "time" in data and data["time"]:
                     self.stop_time = parse_time(str(data["time"]))
             self._save_config()
+            needs_stop = False
             if self._past_stop_time():
                 with self._lock:
-                    if self.status == "playing":
+                    needs_stop = self.status == "playing"
+            if needs_stop:
+
+                def _locked_stop():
+                    with self._lock:
                         self._do_stop()
+
+                await asyncio.get_running_loop().run_in_executor(None, _locked_stop)
             return {
                 "ok": True,
                 "enabled": self.auto_stop_enabled,

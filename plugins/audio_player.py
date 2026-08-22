@@ -516,10 +516,17 @@ class AudioPlayerPlugin(Plugin):
 
         @self.router.post("/restart_camera")
         async def restart_camera():
+            import asyncio
+
             self.stop_playback()
             camera = self.controller.camera
             try:
-                camera.reboot()
+                loop = asyncio.get_running_loop()
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, camera.reboot), timeout=15
+                )
+            except asyncio.TimeoutError:
+                return {"ok": False, "error": "reboot timed out"}
             except Exception as e:
                 return {"ok": False, "error": str(e)}
             return {"ok": True}
