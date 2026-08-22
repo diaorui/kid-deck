@@ -398,41 +398,16 @@ async function pollStatus() {
 setInterval(pollStatus, 3000);
 pollStatus();
 
-/* Shared: restart — tries main server, falls back to emergency server on :port+1 */
-async function confirmRestart() {
-  if (!confirm('Restart the controller? Audio will stop briefly.')) return;
-  var el = document.getElementById('ap-camera-status');
-  if (el) {
-    el.textContent = '● Restarting';
-    el.className = 'camera-status disconnected';
-  }
-  async function tryPost(url, timeoutMs) {
-    var ctrl = new AbortController();
-    var t = setTimeout(function(){ try{ ctrl.abort(); }catch(e){} }, timeoutMs);
-    try {
-      var r = await fetch(url, { method: 'POST', signal: ctrl.signal });
-      clearTimeout(t);
-      return r.ok;
-    } catch(e) {
-      clearTimeout(t);
-      return false;
+/* Shared: restart */
+function confirmRestart() {
+  if (confirm('Restart the controller? Audio will stop briefly.')) {
+    fetch('/api/restart', { method: 'POST' });
+    var el = document.getElementById('ap-camera-status');
+    if (el) {
+      el.textContent = '● Restarting';
+      el.className = 'camera-status disconnected';
     }
   }
-  // 1) main server
-  var ok = await tryPost('/api/restart', 3000);
-  if (ok) return;
-  // 2) emergency server on :port+1 (independent of main event loop)
-  var curPort = parseInt(location.port || "");
-  var ePort = curPort ? (curPort + 1) : 8081;
-  var eUrl = location.protocol + '//' + location.hostname + ':' + ePort + '/restart';
-  var ok2 = await tryPost(eUrl, 3000);
-  if (ok2) return;
-  // both failed
-  if (el) {
-    el.textContent = '● Restart failed';
-    el.className = 'camera-status disconnected';
-  }
-  alert('Restart failed — please restart manually (kill process or reboot device).');
 }
 </script>
 
