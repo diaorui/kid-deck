@@ -1,6 +1,7 @@
 import shutil
 import socket
 import subprocess
+import threading
 import time
 
 import paramiko
@@ -37,29 +38,31 @@ class CameraClient:
         self.password = config["password"]
         self._client: paramiko.SSHClient | None = None
         self._lock = False
+        self._connect_lock = threading.Lock()
 
     def connect(self):
         self._ensure_conn()
 
     def _ensure_conn(self) -> paramiko.SSHClient:
-        if self._client is not None:
-            try:
-                stdin, stdout, stderr = self._client.exec_command("echo ok", timeout=2)
-                if stdout.read().decode().strip() == "ok":
-                    return self._client
-            except Exception:
+        with self._connect_lock:
+            if self._client is not None:
                 try:
-                    self._client.close()
+                    stdin, stdout, stderr = self._client.exec_command("echo ok", timeout=2)
+                    if stdout.read().decode().strip() == "ok":
+                        return self._client
                 except Exception:
-                    pass
-                self._client = None
+                    try:
+                        self._client.close()
+                    except Exception:
+                        pass
+                    self._client = None
 
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        print(f"Connecting to camera {self.host}...", flush=True)
-        client.connect(self.host, username=self.user, password=self.password, timeout=10)
-        self._client = client
-        return client
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            print(f"Connecting to camera {self.host}...", flush=True)
+            client.connect(self.host, username=self.user, password=self.password, timeout=10)
+            self._client = client
+            return client
 
     def play_pcm(self, pcm_data: bytes, rate: int = 16000, volume: int = 60,
                   abort_event=None, tick_callback=None) -> bool:

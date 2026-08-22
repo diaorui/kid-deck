@@ -32,6 +32,8 @@ def setup_logging(cfg: dict):
             while True:
                 _tm.sleep(60)
                 try:
+                    _fault_file.write(f"\n=== { _tm.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+                    _fault_file.flush()
                     _fh.dump_traceback(file=_fault_file)
                 except Exception:
                     pass
@@ -179,7 +181,7 @@ def main():
             {"plugins": controller.plugins},
         )
 
-    _status_cache: dict = {"ok": False, "ts": 0.0}
+    _status_cache: dict = {"ok": False, "ts": 0.0, "fails": 0}
 
     @app.get("/api/status")
     async def status():
@@ -187,7 +189,9 @@ def main():
         import time as _time
 
         now = _time.time()
-        if now - _status_cache["ts"] > 15:
+        fails = _status_cache.get("fails", 0)
+        ttl = 15 if _status_cache.get("ok") else min(60, 15 * (2 ** fails) if fails else 15)
+        if now - _status_cache["ts"] > ttl:
             try:
                 loop = _asyncio.get_running_loop()
                 ok = await _asyncio.wait_for(
@@ -196,7 +200,10 @@ def main():
                 )
             except Exception:
                 ok = False
-            _status_cache.update(ok=ok, ts=now)
+            if ok:
+                _status_cache.update(ok=ok, ts=now, fails=0)
+            else:
+                _status_cache.update(ok=ok, ts=now, fails=fails + 1)
         return {
             "camera_connected": _status_cache["ok"],
             "plugins": [p.name for p in controller.plugins],
