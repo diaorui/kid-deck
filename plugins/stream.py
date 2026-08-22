@@ -534,11 +534,15 @@ class StreamPlugin(Plugin):
         self._outro_cache_lock = threading.Lock()
         self._cache_dir = Path(__file__).resolve().parent.parent / "cache" / "media"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
+        self._meta_dir = Path(__file__).resolve().parent.parent / "cache" / "meta"
+        (self._meta_dir / "yt").mkdir(parents=True, exist_ok=True)
+        (self._meta_dir / "pc").mkdir(parents=True, exist_ok=True)
         self._download_executor = ThreadPoolExecutor(max_workers=2)
         self._downloading_keys: set[str] = set()
         self._cache_lock = threading.Lock()
         self._yt_refresh_count = 0
         self._pc_refresh_count = 0
+        self._load_meta_cache()
         # Separate ydl instances so YT feed thread and play resolve never share one
         self._ydl = yt_dlp.YoutubeDL(
             {
@@ -610,6 +614,68 @@ class StreamPlugin(Plugin):
     def _audio_cache_key(self, item: dict) -> str:
         guid = item.get("guid") or ""
         return md5((guid or item.get("url", "")).encode()).hexdigest()
+
+    # ── meta cache (persistent) ────────────────────────────────
+
+    def _meta_path(self, kind: str, key: str) -> Path:
+        if kind == "yt":
+            safe = quote(key, safe="")
+            return self._meta_dir / "yt" / f"{safe}.json"
+        return self._meta_dir / "pc" / f"{md5(key.encode()).hexdigest()}.json"
+
+    def _save_meta(self, kind: str, key: str, items: list[dict]):
+        try:
+            path = self._meta_path(kind, key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(
+                {"fetched_at": int(time.time()), "items": items},
+                ensure_ascii=False,
+            ))
+            tmp.replace(path)
+        except Exception as e:
+            self.log.warning("save meta failed %s/%s: %s", kind, key, e)
+
+    def _load_meta_cache(self):
+        # yt
+        yt_dir = self._meta_dir / "yt"
+        if yt_dir.is_dir():
+            for p in yt_dir.glob("*.json"):
+                try:
+                    data = json.loads(p.read_text())
+                    items = data.get("items", [])
+                    if not isinstance(items, list):
+                        continue
+                    handle = p.stem
+                    try:
+                        handle = __import__("urllib.parse", fromlist=["unquote"]).unquote(handle)
+                    except Exception:
+                        pass
+                    self._yt_cache[handle] = items
+                    # restore gain from persisted episodes (pc only, but keep here for symmetry)
+                except Exception:
+                    continue
+        # pc — need feed_url -> md5; we can only restore by scanning saved files
+        pc_dir = self._meta_dir / "pc"
+        if pc_dir.is_dir():
+            for p in pc_dir.glob("*.json"):
+                try:
+                    data = json.loads(p.read_text())
+                    items = data.get("items", [])
+                    if not isinstance(items, list) or not items:
+                        continue
+                    # recover feed_name from first item's feed_name if present
+                    feed_name = items[0].get("feed_name") or p.stem
+                    self._pc_cache[feed_name] = items
+                    for ep in items:
+                        ck = self._audio_cache_key(ep)
+                        if ep.get("gain_db") is not None:
+                            self._gain_cache[ck] = float(ep["gain_db"])
+                except Exception:
+                    continue
+        if self._yt_cache or self._pc_cache:
+            self.log.info("restored meta cache: %d YT channels, %d feeds",
+                          len(self._yt_cache), len(self._pc_cache))
 
     def _download_item(self, kind: str, key: str, url: str,
                        published: int, expected_size: int = 0) -> bool:
@@ -895,6 +961,7 @@ class StreamPlugin(Plugin):
                     videos = _fetch_channel_videos(handle, self._ydl)
                     with self._lock:
                         self._yt_cache[handle] = videos
+                    self._save_meta("yt", handle, videos)
                     for v in self._select_candidates(videos, "v"):
                         vid = v.get("video_id") or ""
                         if not vid:
@@ -952,6 +1019,7 @@ class StreamPlugin(Plugin):
                             ep["gain_db"] = 0.0
                     with self._lock:
                         self._pc_cache[feed_name] = episodes
+                    self._save_meta("pc", info["url"], episodes)
                 except Exception as e:
                     self.log.warning("podcast feed: failed %s: %s", feed_name, e)
                 delay = 0.5 if first_pass else self.feed_interval
