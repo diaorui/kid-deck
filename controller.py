@@ -135,6 +135,100 @@ class Controller:
         return self._plugin_map.get(name)
 
 
+def _start_emergency_restart_server(controller, port: int):
+    """Tiny HTTP server on port+1 that can restart even when main loop is frozen."""
+    import threading as _th2
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            if self.path in ("/restart", "/api/restart"):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                try:
+                    self.wfile.write(b'{"ok": true}')
+                except Exception:
+                    pass
+
+                def _do():
+                    import time as _tm2
+
+                    _tm2.sleep(0.3)
+                    logging.getLogger("controller").warning(
+                        "Emergency restart triggered via :%s", port
+                    )
+                    # Try graceful stop with timeout, then force execv
+                    def _graceful():
+                        try:
+                            for plugin in controller.plugins:
+                                try:
+                                    plugin.stop()
+                                except Exception:
+                                    pass
+                            try:
+                                controller.camera.close()
+                            except Exception:
+                                pass
+                            try:
+                                controller.zc.close()
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+
+                    t = _th2.Thread(target=_graceful, daemon=True)
+                    t.start()
+                    t.join(timeout=3)
+                    os.execv(
+                        sys.executable, [sys.executable, __file__] + sys.argv[1:]
+                    )
+
+                _th2.Thread(target=_do, daemon=True).start()
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_GET(self):
+            if self.path in ("/health", "/api/health"):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                try:
+                    self.wfile.write(b'{"ok": true}')
+                except Exception:
+                    pass
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_OPTIONS(self):
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    def _run():
+        try:
+            # Allow immediate reuse after crash
+            ThreadingHTTPServer.allow_reuse_address = True
+            srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+            srv.serve_forever()
+        except Exception as e:
+            logging.getLogger("controller").warning(
+                "Emergency restart server failed on :%s: %s", port, e
+            )
+
+    _th2.Thread(target=_run, daemon=True).start()
+    logging.getLogger("controller").info("Emergency restart server on :%s", port)
+
+
 def main():
     check_deps()
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
@@ -153,6 +247,13 @@ def main():
     plugins_cfg = cfg.get("plugins", {})
     controller.plugins = discover_plugins(controller, plugins_cfg)
     controller._plugin_map = {p.name: p for p in controller.plugins}
+
+    # Emergency restart server (independent of main event loop)
+    try:
+        _emergency_port = int(cfg.get("server", {}).get("port", 8080)) + 1
+        _start_emergency_restart_server(controller, _emergency_port)
+    except Exception as e:
+        logging.getLogger("controller").warning("Failed to start emergency server: %s", e)
 
     app = FastAPI(title="KidDeck")
     templates = Jinja2Templates(directory=Path(__file__).parent)
