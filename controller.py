@@ -200,6 +200,33 @@ def _start_emergency_restart_server(controller, port: int):
                     self.wfile.write(b'{"ok": true}')
                 except Exception:
                     pass
+            elif self.path in ("/", "/emergency"):
+                # Standalone restart page — works even when main server is frozen
+                html = (
+                    b"<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                    b"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                    b"<title>Emergency Restart</title>"
+                    b"<style>body{font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#0f0f1a;color:#e0e0ff}"
+                    b"h1{font-size:18px;margin-bottom:8px}p{color:#8888aa;font-size:13px;margin-bottom:24px;text-align:center;padding:0 16px}"
+                    b"button{padding:14px 28px;border:none;border-radius:12px;background:#ff4444;color:#fff;font-size:16px;font-weight:600;cursor:pointer}"
+                    b"button:active{transform:scale(0.96)}#msg{margin-top:16px;font-size:13px;color:#8888aa}</style></head><body>"
+                    b"<h1>Emergency Restart</h1>"
+                    b"<p>Main server not responding.<br>Tap to restart the controller.</p>"
+                    b"<button onclick=\"fetch('/restart',{method:'POST'}).then(()=>{document.getElementById('msg').textContent='Restarting... please wait 10s then refresh main page.'}).catch(()=>{document.getElementById('msg').textContent='Failed - try again or reboot device.'})\">Restart Controller</button>"
+                    b"<p id='msg'></p>"
+                    b"<p style='font-size:11px;color:#555'>This page is served by the emergency server on port "
+                    + str(port).encode()
+                    + b".<br>Main page is normally on port "
+                    + str(port - 1).encode()
+                    + b".</p></body></html>"
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                try:
+                    self.wfile.write(html)
+                except Exception:
+                    pass
             else:
                 self.send_response(404)
                 self.end_headers()
