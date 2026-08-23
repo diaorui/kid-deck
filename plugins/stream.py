@@ -221,13 +221,13 @@ def _validate_image_url(url: str) -> bool:
                 is_valid = True
 
         if not is_valid and not head_succeeded_but_rejected:
-            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5, stream=True)
-            if r.status_code == 200:
-                ctype = (r.headers.get("content-type") or "").lower()
-                if ctype.startswith("image/"):
-                    is_valid = True
-                elif not ctype.startswith("text/") and _is_image_by_path(url):
-                    is_valid = True
+            with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5, stream=True) as r:
+                if r.status_code == 200:
+                    ctype = (r.headers.get("content-type") or "").lower()
+                    if ctype.startswith("image/"):
+                        is_valid = True
+                    elif not ctype.startswith("text/") and _is_image_by_path(url):
+                        is_valid = True
     except Exception:
         is_valid = False
 
@@ -694,14 +694,14 @@ class StreamPlugin(Plugin):
                     check_size = expected_size
                     if kind == "v":
                         base = str(target.with_suffix(""))
-                        ydl = yt_dlp.YoutubeDL({
+                        with yt_dlp.YoutubeDL({
                             "format": "22/18",
                             "quiet": True,
                             "outtmpl": base + ".%(ext)s",
                             "socket_timeout": 30,
                             "extractor_args": {"youtube": ["player_client=android"]},
-                        })
-                        ydl.download([url])
+                        }) as ydl:
+                            ydl.download([url])
                         if not target.exists():
                             dl = Path(base)
                             if not dl.exists():
@@ -712,14 +712,14 @@ class StreamPlugin(Plugin):
                                 raise FileNotFoundError(f"yt-dlp output not found: {base}")
                         actual_size = target.stat().st_size
                     else:
-                        r = requests.get(url, stream=True, timeout=30)
-                        cl = int(r.headers.get("content-length", 0))
-                        if cl > 0:
-                            check_size = cl
-                        with open(part, "wb") as f:
-                            for chunk in r.iter_content(8192):
-                                if chunk:
-                                    f.write(chunk)
+                        with requests.get(url, stream=True, timeout=30) as r:
+                            cl = int(r.headers.get("content-length", 0))
+                            if cl > 0:
+                                check_size = cl
+                            with open(part, "wb") as f:
+                                for chunk in r.iter_content(8192):
+                                    if chunk:
+                                        f.write(chunk)
                         actual_size = part.stat().st_size
                     if check_size > 0:
                         if abs(actual_size - check_size) <= 1024:
@@ -1270,14 +1270,14 @@ class StreamPlugin(Plugin):
             last_exc = None
             for attempt in range(1, max_attempts + 1):
                 try:
-                    ydl = yt_dlp.YoutubeDL({
+                    with yt_dlp.YoutubeDL({
                         "format": "22/18",
                         "quiet": True,
                         "outtmpl": str(part),
                         "socket_timeout": 30,
                         "extractor_args": {"youtube": ["player_client=android"]},
-                    })
-                    ydl.download([f"https://youtube.com/watch?v={vid}"])
+                    }) as ydl:
+                        ydl.download([f"https://youtube.com/watch?v={vid}"])
                     last_exc = None
                     break
                 except Exception as e:

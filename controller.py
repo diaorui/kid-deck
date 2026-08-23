@@ -29,10 +29,18 @@ def setup_logging(cfg: dict):
         _fh.enable(file=_fault_file)
 
         def _watchdog():
+            import os as _os
+
             while True:
                 _tm.sleep(60)
                 try:
-                    _fault_file.write(f"\n=== { _tm.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+                    try:
+                        fdcount = len(_os.listdir("/proc/self/fd"))
+                    except Exception:
+                        fdcount = -1
+                    _fault_file.write(
+                        f"\n=== {_tm.strftime('%Y-%m-%d %H:%M:%S')} fds={fdcount} ===\n"
+                    )
                     _fault_file.flush()
                     _fh.dump_traceback(file=_fault_file)
                 except Exception:
@@ -136,6 +144,18 @@ class Controller:
 
 
 def main():
+    # Raise soft fd limit early — fd exhaustion freezes the HTTP server
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = min(8192, hard)
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            print(f"Raised fd soft limit: {soft} -> {target}", flush=True)
+    except Exception as e:
+        print(f"Could not raise fd limit: {e}", flush=True)
+
     check_deps()
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
     cfg = load_config(config_path)
