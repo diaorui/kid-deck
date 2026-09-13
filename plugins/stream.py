@@ -2,8 +2,10 @@ import json
 import logging
 import os
 import re
+import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -416,6 +418,42 @@ def _unlink(p: Path):
     p.unlink(missing_ok=True)
 
 
+_YTDLP_TIMEOUT = 180
+_DOWNLOAD_COOLDOWN = 1800
+_YT_EXTRACTOR_ARGS = {"youtube": {"player_client": ["android"]}}
+
+
+def _run_yt_dlp(url: str, outtmpl: str, timeout: int = _YTDLP_TIMEOUT) -> None:
+    cmd = [
+        sys.executable, "-m", "yt_dlp",
+        "-f", "22/18",
+        "-o", outtmpl,
+        "--socket-timeout", "30",
+        "--extractor-args", "youtube:player_client=android",
+        "--quiet",
+        "--no-warnings",
+        url,
+    ]
+    proc = subprocess.Popen(
+        cmd,
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        _, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+        raise TimeoutError(f"yt-dlp timed out after {timeout}s")
+    if proc.returncode != 0:
+        msg = (err or b"").decode("utf-8", errors="replace")[-400:]
+        raise RuntimeError(f"yt-dlp exited {proc.returncode}: {msg}")
+
+
 def plan_playlist(
     video_pool: list[dict],
     audio_pool: list[dict],
@@ -539,6 +577,7 @@ class StreamPlugin(Plugin):
         (self._meta_dir / "pc").mkdir(parents=True, exist_ok=True)
         self._download_executor = ThreadPoolExecutor(max_workers=2)
         self._downloading_keys: set[str] = set()
+        self._download_fail_until: dict[str, float] = {}
         self._cache_lock = threading.Lock()
         self._yt_refresh_count = 0
         self._pc_refresh_count = 0
@@ -551,7 +590,7 @@ class StreamPlugin(Plugin):
                 "playlistend": self.yt_fetch_per_channel,
                 "socket_timeout": 30,
                 "remote_components": ["ejs:github"],
-                "extractor_args": {"youtube": ["player_client=android"]},
+                "extractor_args": _YT_EXTRACTOR_ARGS,
             }
         )
         self._ydl_play = yt_dlp.YoutubeDL(
@@ -560,7 +599,7 @@ class StreamPlugin(Plugin):
                 "quiet": True,
                 "socket_timeout": 30,
                 "remote_components": ["ejs:github"],
-                "extractor_args": {"youtube": ["player_client=android"]},
+                "extractor_args": _YT_EXTRACTOR_ARGS,
             }
         )
 
@@ -677,6 +716,32 @@ class StreamPlugin(Plugin):
             self.log.info("restored meta cache: %d YT channels, %d feeds",
                           len(self._yt_cache), len(self._pc_cache))
 
+    def _fail_key(self, kind: str, key: str) -> str:
+        return f"{kind}/{key}"
+
+    def _should_skip_download(self, kind: str, key: str) -> bool:
+        with self._cache_lock:
+            if key in self._downloading_keys:
+                return True
+            return self._download_fail_until.get(self._fail_key(kind, key), 0) > time.time()
+
+    def _mark_download_fail(self, kind: str, key: str):
+        with self._cache_lock:
+            self._download_fail_until[self._fail_key(kind, key)] = (
+                time.time() + _DOWNLOAD_COOLDOWN
+            )
+
+    def _mark_download_ok(self, kind: str, key: str):
+        with self._cache_lock:
+            self._download_fail_until.pop(self._fail_key(kind, key), None)
+
+    def _enqueue_download(self, kind: str, key: str, url: str,
+                          published: int, expected_size: int = 0):
+        if self._should_skip_download(kind, key):
+            return
+        self._download_executor.submit(
+            self._download_item, kind, key, url, published, expected_size)
+
     def _download_item(self, kind: str, key: str, url: str,
                        published: int, expected_size: int = 0) -> bool:
         target = self._cache_path(kind, key)
@@ -694,14 +759,7 @@ class StreamPlugin(Plugin):
                     check_size = expected_size
                     if kind == "v":
                         base = str(target.with_suffix(""))
-                        with yt_dlp.YoutubeDL({
-                            "format": "22/18",
-                            "quiet": True,
-                            "outtmpl": base + ".%(ext)s",
-                            "socket_timeout": 30,
-                            "extractor_args": {"youtube": ["player_client=android"]},
-                        }) as ydl:
-                            ydl.download([url])
+                        _run_yt_dlp(url, base + ".%(ext)s")
                         if not target.exists():
                             dl = Path(base)
                             if not dl.exists():
@@ -738,7 +796,8 @@ class StreamPlugin(Plugin):
                         self.log.info("cache retry %d/3 %s/%s in %ds", attempt, kind, key, attempt * 5)
                         time.sleep(attempt * 5)
             else:
-                self.log.warning("cache failed after 3 retries: %s/%s", kind, key)
+                self._mark_download_fail(kind, key)
+                self.log.warning("cache failed after 3 retries: %s/%s (retry in 30min)", kind, key)
                 return False
             if kind != "v":
                 part.rename(target)
@@ -746,6 +805,7 @@ class StreamPlugin(Plugin):
                 "size": actual_size,
                 "published": published,
             }))
+            self._mark_download_ok(kind, key)
             self.log.info("cached %s/%s (%.1f MB)", kind, key, actual_size / 1024 / 1024)
             return True
         finally:
@@ -970,9 +1030,8 @@ class StreamPlugin(Plugin):
                         if self._cache_valid(path):
                             continue
                         pub = int(v.get("published") or v.get("timestamp") or time.time())
-                        self._download_executor.submit(
-                            self._download_item, "v", vid,
-                            f"https://youtube.com/watch?v={vid}", pub)
+                        self._enqueue_download(
+                            "v", vid, f"https://youtube.com/watch?v={vid}", pub)
                 except Exception as e:
                     self.log.warning("YT feed: failed %s: %s", handle, e)
                 delay = 0.5 if first_pass else self.feed_interval
@@ -1005,9 +1064,8 @@ class StreamPlugin(Plugin):
                         if self._cache_valid(path):
                             continue
                         pub = int(ep.get("published") or time.time())
-                        self._download_executor.submit(
-                            self._download_item, "a", ck,
-                            ep.get("url", ""), pub, 0)
+                        self._enqueue_download(
+                            "a", ck, ep.get("url", ""), pub, 0)
                     for ep in episodes:
                         ck = self._audio_cache_key(ep)
                         path = self._cache_path("a", ck)
@@ -1270,14 +1328,7 @@ class StreamPlugin(Plugin):
             last_exc = None
             for attempt in range(1, max_attempts + 1):
                 try:
-                    with yt_dlp.YoutubeDL({
-                        "format": "22/18",
-                        "quiet": True,
-                        "outtmpl": str(part),
-                        "socket_timeout": 30,
-                        "extractor_args": {"youtube": ["player_client=android"]},
-                    }) as ydl:
-                        ydl.download([f"https://youtube.com/watch?v={vid}"])
+                    _run_yt_dlp(f"https://youtube.com/watch?v={vid}", str(part))
                     last_exc = None
                     break
                 except Exception as e:
