@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time as dtime, timezone
 from email.utils import parsedate_to_datetime
-from hashlib import md5
+from hashlib import md5, sha256
 from pathlib import Path
 from urllib.parse import quote
 
@@ -454,6 +454,29 @@ def _run_yt_dlp(url: str, outtmpl: str, timeout: int = _YTDLP_TIMEOUT) -> None:
         raise RuntimeError(f"yt-dlp exited {proc.returncode}: {msg}")
 
 
+def _content_sha(path: Path, timeout: int = 120) -> str | None:
+    """sha256 of audio decoded to 8k mono s16le (pipe, nothing on disk).
+    Returns None on any failure — caller treats that as 'no fingerprint'."""
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(path),
+             "-ar", "8000", "-ac", "1", "-f", "s16le", "-"],
+            capture_output=True, timeout=timeout,
+        )
+        if proc.returncode != 0 or not proc.stdout:
+            return None
+        return sha256(proc.stdout).hexdigest()
+    except Exception:
+        return None
+
+
+def _read_meta(path: Path) -> dict:
+    try:
+        return json.loads(path.with_suffix(".meta").read_text())
+    except Exception:
+        return {}
+
+
 def plan_playlist(
     video_pool: list[dict],
     audio_pool: list[dict],
@@ -562,6 +585,7 @@ class StreamPlugin(Plugin):
         self._gain_cache: dict[str, float] = {}
         self._yt_feed_thread: threading.Thread | None = None
         self._pc_feed_thread: threading.Thread | None = None
+        self._sha_backfill_thread: threading.Thread | None = None
         self._scheduler_thread: threading.Thread | None = None
         self._feed_stop_event = threading.Event()
         self._play_start: float = 0.0
@@ -801,9 +825,13 @@ class StreamPlugin(Plugin):
                 return False
             if kind != "v":
                 part.rename(target)
+            content_sha = ""
+            if kind == "a":
+                content_sha = _content_sha(target) or ""
             target.with_suffix(".meta").write_text(json.dumps({
                 "size": actual_size,
                 "published": published,
+                "content_sha": content_sha,
             }))
             self._mark_download_ok(kind, key)
             self.log.info("cached %s/%s (%.1f MB)", kind, key, actual_size / 1024 / 1024)
@@ -957,6 +985,7 @@ class StreamPlugin(Plugin):
                 break
 
         audio_pool: list[dict] = []
+        seen_sha: set[str] = set()
         acc = 0.0
         for it in uniq_a:
             ck = it.get("_cache_key", "")
@@ -965,6 +994,13 @@ class StreamPlugin(Plugin):
             path = self._cache_path("a", ck)
             if not self._cache_valid(path):
                 continue
+            sha = _read_meta(path).get("content_sha") or ""
+            if sha:
+                if sha in seen_sha:
+                    self.log.info("dedup audio (same content): %s [%s]",
+                                  it.get("title"), it.get("source"))
+                    continue
+                seen_sha.add(sha)
             url = self._cache_http_url("a", ck)
             if not url:
                 continue
@@ -1569,6 +1605,35 @@ class StreamPlugin(Plugin):
         self.status = "disconnected"
         self.device_name = ""
 
+    def _backfill_sha_loop(self):
+        """One pass over cached audio: fill missing content_sha in .meta sidecars.
+        Runs once per process start; files already stamped are skipped in ms."""
+        try:
+            files = sorted((self._cache_dir / "a").glob("*.mp3"))
+        except Exception:
+            return
+        done = 0
+        for path in files:
+            if self._feed_stop_event.is_set():
+                return
+            try:
+                meta_path = path.with_suffix(".meta")
+                if not meta_path.exists():
+                    continue
+                meta = json.loads(meta_path.read_text())
+                if meta.get("content_sha"):
+                    continue
+                sha = _content_sha(path)
+                if not sha:
+                    continue
+                meta["content_sha"] = sha
+                meta_path.write_text(json.dumps(meta))
+                done += 1
+            except Exception:
+                continue
+        if done:
+            self.log.info("backfilled content_sha for %d cached audio files", done)
+
     def start(self):
         super().start()
         self._feed_stop_event.clear()
@@ -1578,6 +1643,9 @@ class StreamPlugin(Plugin):
         self._pc_feed_thread = threading.Thread(target=self._pc_feed_loop, daemon=True)
         self._yt_feed_thread.start()
         self._pc_feed_thread.start()
+        self._sha_backfill_thread = threading.Thread(
+            target=self._backfill_sha_loop, daemon=True)
+        self._sha_backfill_thread.start()
         self._scheduler_thread = threading.Thread(
             target=self._scheduler_loop, daemon=True
         )
@@ -1593,6 +1661,8 @@ class StreamPlugin(Plugin):
             self._yt_feed_thread.join(timeout=5)
         if self._pc_feed_thread:
             self._pc_feed_thread.join(timeout=5)
+        if getattr(self, "_sha_backfill_thread", None):
+            self._sha_backfill_thread.join(timeout=5)
         self._do_stop()
         super().stop()
         self.log.info("stopped")
