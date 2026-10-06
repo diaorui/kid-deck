@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time as dtime, timezone
 from email.utils import parsedate_to_datetime
-from hashlib import md5, sha256
+from hashlib import md5
 from pathlib import Path
 from urllib.parse import quote
 
@@ -454,9 +454,19 @@ def _run_yt_dlp(url: str, outtmpl: str, timeout: int = _YTDLP_TIMEOUT) -> None:
         raise RuntimeError(f"yt-dlp exited {proc.returncode}: {msg}")
 
 
-def _content_sha(path: Path, timeout: int = 120) -> str | None:
-    """sha256 of audio decoded to 8k mono s16le (pipe, nothing on disk).
+_ENV_BIN_SEC = 0.2  # RMS bin size; 8min audio -> ~2500 points
+_ENV_THRESHOLD = 0.99  # Pearson correlation at/above this = same content
+_ENV_LEN_TOL = 0.05  # envelope lengths must agree within 5%
+
+
+def _audio_fingerprint(path: Path, timeout: int = 120) -> str | None:
+    """Perceptual fingerprint: RMS envelope of audio decoded to 8k mono
+    s16le (pipe, nothing on disk), normalized to uint8, base64-encoded.
+    Same recording under different lossy encodes -> ~1.0 correlation.
     Returns None on any failure — caller treats that as 'no fingerprint'."""
+    import array as _array
+    import base64 as _b64
+
     try:
         proc = subprocess.run(
             ["ffmpeg", "-v", "error", "-i", str(path),
@@ -465,9 +475,60 @@ def _content_sha(path: Path, timeout: int = 120) -> str | None:
         )
         if proc.returncode != 0 or not proc.stdout:
             return None
-        return sha256(proc.stdout).hexdigest()
+        pcm = _array.array("h", proc.stdout)
+        per = int(8000 * _ENV_BIN_SEC)
+        n = len(pcm) // per
+        if n < 10:
+            return None
+        rms = [0.0] * n
+        for i in range(n):
+            s = 0
+            base = i * per
+            for j in range(base, base + per):
+                v = pcm[j]
+                s += v * v
+            rms[i] = (s / per) ** 0.5
+        peak = max(rms)
+        if peak <= 0:
+            return None
+        return _b64.b64encode(
+            bytes(min(255, int(round(x / peak * 255))) for x in rms)
+        ).decode("ascii")
     except Exception:
         return None
+
+
+def _decode_fp(s: str) -> list[int] | None:
+    import base64 as _b64
+
+    try:
+        return list(_b64.b64decode(s.encode("ascii")))
+    except Exception:
+        return None
+
+
+def _pearson(a: list[int], b: list[int]) -> float:
+    """Pearson correlation over the shared prefix. -1.0 = not comparable."""
+    n = min(len(a), len(b)) if a and b else 0
+    if n < 10:
+        return -1.0
+    if abs(len(a) - len(b)) / max(len(a), len(b)) > _ENV_LEN_TOL:
+        return -1.0
+    a = a[:n]
+    b = b[:n]
+    ma = sum(a) / n
+    mb = sum(b) / n
+    sa = sb = sab = 0.0
+    for x, y in zip(a, b):
+        dx = x - ma
+        dy = y - mb
+        sa += dx * dx
+        sb += dy * dy
+        sab += dx * dy
+    denom = (sa * sb) ** 0.5
+    if denom == 0:
+        return -1.0
+    return sab / denom
 
 
 def _read_meta(path: Path) -> dict:
@@ -825,13 +886,13 @@ class StreamPlugin(Plugin):
                 return False
             if kind != "v":
                 part.rename(target)
-            content_sha = ""
+            content_fp = ""
             if kind == "a":
-                content_sha = _content_sha(target) or ""
+                content_fp = _audio_fingerprint(target) or ""
             target.with_suffix(".meta").write_text(json.dumps({
                 "size": actual_size,
                 "published": published,
-                "content_sha": content_sha,
+                "content_fp": content_fp,
             }))
             self._mark_download_ok(kind, key)
             self.log.info("cached %s/%s (%.1f MB)", kind, key, actual_size / 1024 / 1024)
@@ -985,7 +1046,7 @@ class StreamPlugin(Plugin):
                 break
 
         audio_pool: list[dict] = []
-        seen_sha: set[str] = set()
+        kept_envs: list[list[int]] = []
         acc = 0.0
         for it in uniq_a:
             ck = it.get("_cache_key", "")
@@ -994,13 +1055,14 @@ class StreamPlugin(Plugin):
             path = self._cache_path("a", ck)
             if not self._cache_valid(path):
                 continue
-            sha = _read_meta(path).get("content_sha") or ""
-            if sha:
-                if sha in seen_sha:
+            fp = _read_meta(path).get("content_fp") or ""
+            env = _decode_fp(fp) if fp else None
+            if env is not None:
+                if any(_pearson(env, kept) >= _ENV_THRESHOLD for kept in kept_envs):
                     self.log.info("dedup audio (same content): %s [%s]",
                                   it.get("title"), it.get("source"))
                     continue
-                seen_sha.add(sha)
+                kept_envs.append(env)
             url = self._cache_http_url("a", ck)
             if not url:
                 continue
@@ -1606,7 +1668,7 @@ class StreamPlugin(Plugin):
         self.device_name = ""
 
     def _backfill_sha_loop(self):
-        """One pass over cached audio: fill missing content_sha in .meta sidecars.
+        """One pass over cached audio: fill missing content_fp in .meta sidecars.
         Runs once per process start; files already stamped are skipped in ms."""
         try:
             files = sorted((self._cache_dir / "a").glob("*.mp3"))
@@ -1621,18 +1683,21 @@ class StreamPlugin(Plugin):
                 if not meta_path.exists():
                     continue
                 meta = json.loads(meta_path.read_text())
-                if meta.get("content_sha"):
+                if meta.get("content_fp"):
+                    if meta.pop("content_sha", None) is not None:
+                        meta_path.write_text(json.dumps(meta))
                     continue
-                sha = _content_sha(path)
-                if not sha:
+                fp = _audio_fingerprint(path)
+                if not fp:
                     continue
-                meta["content_sha"] = sha
+                meta["content_fp"] = fp
+                meta.pop("content_sha", None)
                 meta_path.write_text(json.dumps(meta))
                 done += 1
             except Exception:
                 continue
         if done:
-            self.log.info("backfilled content_sha for %d cached audio files", done)
+            self.log.info("backfilled content_fp for %d cached audio files", done)
 
     def start(self):
         super().start()
