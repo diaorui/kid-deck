@@ -715,7 +715,14 @@ class StreamPlugin(Plugin):
             expected = m.get("size", 0)
             if expected == 0:
                 return False
-            return abs(path.stat().st_size - expected) <= 1024
+            if abs(path.stat().st_size - expected) > 1024:
+                return False
+            if path.suffix == ".mp3":
+                # reject HTML/XML error pages saved as audio (CDN blocks etc.)
+                with path.open("rb") as f:
+                    if f.read(1) == b"<":
+                        return False
+            return True
         except Exception:
             return False
 
@@ -839,6 +846,7 @@ class StreamPlugin(Plugin):
             target.parent.mkdir(parents=True, exist_ok=True)
             _unlink(part)
             actual_size = 0
+            audio_fp = ""
             for attempt in range(1, 4):
                 try:
                     check_size = expected_size
@@ -856,6 +864,7 @@ class StreamPlugin(Plugin):
                         actual_size = target.stat().st_size
                     else:
                         with requests.get(url, stream=True, timeout=30) as r:
+                            r.raise_for_status()
                             cl = int(r.headers.get("content-length", 0))
                             if cl > 0:
                                 check_size = cl
@@ -864,16 +873,23 @@ class StreamPlugin(Plugin):
                                     if chunk:
                                         f.write(chunk)
                         actual_size = part.stat().st_size
+                        if actual_size > 0:
+                            with part.open("rb") as f:
+                                if f.read(1) == b"<":
+                                    raise ValueError("got HTML instead of audio")
                     if check_size > 0:
-                        if abs(actual_size - check_size) <= 1024:
-                            break
+                        size_ok = abs(actual_size - check_size) <= 1024
                     elif kind == "v":
-                        if actual_size >= 500 * 1024:
-                            break
+                        size_ok = actual_size >= 500 * 1024
                     else:
-                        if actual_size >= 100 * 1024:
-                            break
-                    raise ValueError(f"size mismatch: got {actual_size}, expected {check_size}")
+                        size_ok = actual_size >= 100 * 1024
+                    if not size_ok:
+                        raise ValueError(f"size mismatch: got {actual_size}, expected {check_size}")
+                    if kind == "a":
+                        audio_fp = _audio_fingerprint(part) or ""
+                        if not audio_fp:
+                            raise ValueError("downloaded file is not decodable audio")
+                    break
                 except Exception:
                     if kind != "v":
                         _unlink(part)
@@ -886,9 +902,7 @@ class StreamPlugin(Plugin):
                 return False
             if kind != "v":
                 part.rename(target)
-            content_fp = ""
-            if kind == "a":
-                content_fp = _audio_fingerprint(target) or ""
+            content_fp = audio_fp if kind == "a" else ""
             target.with_suffix(".meta").write_text(json.dumps({
                 "size": actual_size,
                 "published": published,
